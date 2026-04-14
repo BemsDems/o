@@ -1,6 +1,6 @@
-# Colab-ready: MOEX/CBR feature engineering + LSTM classifier (Sonnet ENHANCED v2.0)
-# NOTE: This is an experimental, feature-rich variant aimed at improving
-# generalization under regime drift. It does NOT guarantee any target accuracy.
+# SONNET MODEL v3.0 - RADICAL SIMPLIFICATION
+# Target: stability via simpler target/features/model.
+# NOTE: No accuracy target is guaranteed.
 #
 # In Colab:
 # !pip -q install requests pandas numpy scikit-learn tensorflow lxml html5lib
@@ -33,33 +33,29 @@ from sklearn.metrics import (
 from sklearn.utils.class_weight import compute_class_weight
 
 # ----------------------------
-# ENHANCED CONFIG
+# SIMPLIFIED CONFIG - FOCUS ON STABILITY
 # ----------------------------
 CFG: Dict[str, Any] = {
     "TICKER": "SBER",
     "START": "2015-01-01",
-    "END": None,  # None => today
+    "END": None,
 
-    # target
-    "TARGET_HORIZON_DAYS": 7,
-    "TARGET_UP_THRESHOLD": 0.025,
+    "TARGET_HORIZON_DAYS": 5,
+    "TARGET_UP_THRESHOLD": 0.02,
 
-    # windows
-    "SEQ_LEN": 40,
+    "SEQ_LEN": 30,
 
-    # splits (time-based)
-    "TRAIN_SPLIT": 0.75,
-    "VAL_SPLIT": 0.15,  # fraction of TRAIN part (time-based)
+    "TRAIN_SPLIT": 0.70,
+    "VAL_SPLIT": 0.15,
 
-    # training
-    "BATCH_SIZE": 32,
-    "EPOCHS": 50,
-    "LR": 5e-4,
+    "BATCH_SIZE": 64,
+    "EPOCHS": 100,
+    "LR": 1e-3,
 
     "SEED": 42,
     "CACHE_DIR": "cache",
 
-    # evaluation
+    "DIAGNOSTICS": False,
     "BEST_THR": 0.5,
     "FEE": 0.001,
 }
@@ -82,25 +78,19 @@ def _cache_path(name: str) -> str:
 # ----------------------------
 
 def _get_json(url: str, *, params: dict | None = None, timeout: int = 30) -> dict:
-    """GET url and decode JSON with better error messages."""
-
     r = requests.get(url, params=params, timeout=timeout)
     ct = (r.headers.get("Content-Type") or "").lower()
     try:
         r.raise_for_status()
     except Exception as e:  # noqa: BLE001
         preview = (r.text or "")[:300].replace("\n", " ")
-        raise RuntimeError(
-            f"HTTP error for {url} status={r.status_code} ct={ct} preview={preview!r}"
-        ) from e
+        raise RuntimeError(f"HTTP error for {url} status={r.status_code} ct={ct} preview={preview!r}") from e
 
     try:
         return r.json()
     except Exception as e:  # noqa: BLE001
         preview = (r.text or "")[:300].replace("\n", " ")
-        raise RuntimeError(
-            f"Non-JSON response for {url} status={r.status_code} ct={ct} preview={preview!r}"
-        ) from e
+        raise RuntimeError(f"Non-JSON response for {url} status={r.status_code} ct={ct} preview={preview!r}") from e
 
 
 # ----------------------------
@@ -108,14 +98,13 @@ def _get_json(url: str, *, params: dict | None = None, timeout: int = 30) -> dic
 # ----------------------------
 
 def fetch_moex_history(secid: str, start: str, end: Optional[str]) -> pd.DataFrame:
-    """Fetch OHLCV via MOEX ISS history (shares)."""
-    url = (
-        "https://iss.moex.com/iss/history/engines/stock/markets/shares/"
-        f"securities/{secid}.json"
-    )
+    """Fetch OHLCV via MOEX ISS history."""
+    url = f"https://iss.moex.com/iss/history/engines/stock/markets/shares/securities/{secid}.json"
 
     all_rows = []
     start_pos = 0
+    cols = []
+
     while True:
         params = {
             "from": start,
@@ -127,7 +116,7 @@ def fetch_moex_history(secid: str, start: str, end: Optional[str]) -> pd.DataFra
         }
         j = _get_json(url, params=params, timeout=30)
         block = j.get("history", {})
-        cols = block.get("columns", [])
+        cols = block.get("columns", cols)
         data = block.get("data", [])
         if not data:
             break
@@ -143,6 +132,7 @@ def fetch_moex_history(secid: str, start: str, end: Optional[str]) -> pd.DataFra
     df["TRADEDATE"] = pd.to_datetime(df["TRADEDATE"], errors="coerce")
     df = df.dropna(subset=["TRADEDATE"]).sort_values("TRADEDATE").reset_index(drop=True)
     df = df.rename(columns={"TRADEDATE": "date"})
+
     for c in ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "VALUE"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -151,7 +141,7 @@ def fetch_moex_history(secid: str, start: str, end: Optional[str]) -> pd.DataFra
 
 
 def fetch_cbr_usdrub(start: str, end: Optional[str]) -> pd.Series:
-    """CBR XML dynamic for USD (R01235)."""
+    """CBR XML dynamic for USD."""
     import datetime as dt
     from xml.etree import ElementTree as ET
 
@@ -179,36 +169,18 @@ def fetch_cbr_usdrub(start: str, end: Optional[str]) -> pd.Series:
 
 
 # ----------------------------
-# TARGET + FEATURES
+# SIMPLIFIED TARGET + FEATURES
 # ----------------------------
+
+def make_simple_target(close: pd.Series, horizon: int, thr: float) -> pd.Series:
+    """Simple target: future return > threshold."""
+    fwd_ret = (close.shift(-horizon) - close) / close
+    return (fwd_ret >= thr).astype(int)
+
 
 def make_forward_return(close: pd.Series, horizon: int) -> pd.Series:
     fwd = close.shift(-horizon)
     return (fwd - close) / close
-
-
-def make_smart_target(close: pd.Series, volume: pd.Series, horizon: int, thr: float) -> pd.Series:
-    """Target with a simple volume confirmation and risk-adjusted outlier mode.
-
-    This is still best-effort: it can improve label quality sometimes, but can
-    also introduce instability if volume series is noisy.
-    """
-
-    fwd_ret = make_forward_return(close, horizon)
-
-    vol_ma = volume.rolling(20).mean()
-    future_vol = volume.shift(-horizon)
-    vol_confirmation = future_vol > vol_ma
-
-    # risk-adjusted return proxy (divide by rolling realized vol)
-    ret_vol = close.pct_change().rolling(20).std()
-    future_price_vol = ret_vol.shift(-horizon)
-    risk_adj_return = fwd_ret / (future_price_vol + 1e-8)
-
-    strong_move = (fwd_ret >= thr) & vol_confirmation
-    exceptional_move = risk_adj_return > risk_adj_return.quantile(0.85)
-
-    return (strong_move | exceptional_move).astype(int)
 
 
 def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -219,181 +191,95 @@ def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 
-def add_enhanced_features(df: pd.DataFrame, usd: pd.Series) -> pd.DataFrame:
-    """Expanded feature set (technical + FX context)."""
+def add_stable_features(df: pd.DataFrame, usd: pd.Series) -> pd.DataFrame:
+    """Only stable features (small set)."""
 
     out = df.copy()
 
-    # BASIC RETURNS
+    # RETURNS
     out["ret_1d"] = out["CLOSE"].pct_change(1)
-    out["ret_3d"] = out["CLOSE"].pct_change(3)
     out["ret_5d"] = out["CLOSE"].pct_change(5)
     out["ret_10d"] = out["CLOSE"].pct_change(10)
     out["ret_20d"] = out["CLOSE"].pct_change(20)
     out["log_ret"] = np.log(out["CLOSE"] / out["CLOSE"].shift(1))
 
+    # TREND
+    sma20 = out["CLOSE"].rolling(20).mean()
+    sma50 = out["CLOSE"].rolling(50).mean()
+    sma200 = out["CLOSE"].rolling(200).mean()
+    out["price_vs_sma20"] = out["CLOSE"] / (sma20 + 1e-12) - 1
+    out["price_vs_sma50"] = out["CLOSE"] / (sma50 + 1e-12) - 1
+    out["trend_up"] = (out["CLOSE"] > sma200).astype(int)
+
     # MOMENTUM
     out["rsi_14"] = _rsi(out["CLOSE"], 14)
-    out["rsi_30"] = _rsi(out["CLOSE"], 30)
-    out["rsi_divergence"] = out["rsi_14"] - out["rsi_30"]
 
-    # MACD
+    # MACD histogram
     ema12 = out["CLOSE"].ewm(span=12, adjust=False).mean()
     ema26 = out["CLOSE"].ewm(span=26, adjust=False).mean()
-    out["macd"] = ema12 - ema26
-    out["macd_signal"] = out["macd"].ewm(span=9, adjust=False).mean()
-    out["macd_histogram"] = out["macd"] - out["macd_signal"]
-    out["macd_cross"] = (out["macd"] > out["macd_signal"]).astype(int)
+    macd = ema12 - ema26
+    macd_signal = macd.ewm(span=9, adjust=False).mean()
+    out["macd_histogram"] = macd - macd_signal
 
-    # TREND
-    out["sma_5"] = out["CLOSE"].rolling(5).mean()
-    out["sma_10"] = out["CLOSE"].rolling(10).mean()
-    out["sma_20"] = out["CLOSE"].rolling(20).mean()
-    out["sma_50"] = out["CLOSE"].rolling(50).mean()
-    out["sma_200"] = out["CLOSE"].rolling(200).mean()
-
-    out["price_vs_sma20"] = out["CLOSE"] / (out["sma_20"] + 1e-12) - 1
-    out["price_vs_sma50"] = out["CLOSE"] / (out["sma_50"] + 1e-12) - 1
-    out["sma_slope_20"] = (out["sma_20"] - out["sma_20"].shift(5)) / (out["sma_20"].shift(5) + 1e-12)
-
-    out["trend_strength"] = (
-        (out["CLOSE"] > out["sma_5"]).astype(int)
-        + (out["CLOSE"] > out["sma_10"]).astype(int)
-        + (out["CLOSE"] > out["sma_20"]).astype(int)
-        + (out["CLOSE"] > out["sma_50"]).astype(int)
-    ) / 4.0
-
-    # VOLATILITY
-    out["volatility_5"] = out["ret_1d"].rolling(5).std()
+    # VOLATILITY / VOLUME
     out["volatility_20"] = out["ret_1d"].rolling(20).std()
-    out["volatility_60"] = out["ret_1d"].rolling(60).std()
-    out["vol_regime"] = (out["volatility_20"] > out["volatility_20"].rolling(60).quantile(0.7)).astype(int)
+    out["volume_ratio"] = out["VOLUME"] / (out["VOLUME"].rolling(20).mean() + 1e-8)
 
-    # BOLLINGER
-    bb_middle = out["CLOSE"].rolling(20).mean()
-    bb_std = out["CLOSE"].rolling(20).std()
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    out["bb_position"] = (out["CLOSE"] - bb_lower) / ((bb_upper - bb_lower) + 1e-8)
-    out["bb_squeeze"] = (bb_upper - bb_lower) / (bb_middle + 1e-12)
-
-    # VOLUME
-    out["volume_sma"] = out["VOLUME"].rolling(20).mean()
-    out["volume_ratio"] = out["VOLUME"] / (out["volume_sma"] + 1e-8)
-    out["volume_spike"] = (out["volume_ratio"] > 2.0).astype(int)
-    out["pv_trend"] = (out["ret_1d"] * np.log(out["volume_ratio"] + 1)).rolling(5).mean()
-
-    # SUPPORT/RESISTANCE proxy
-    out["high_20"] = out["HIGH"].rolling(20).max()
-    out["low_20"] = out["LOW"].rolling(20).min()
-    out["price_position"] = (out["CLOSE"] - out["low_20"]) / ((out["high_20"] - out["low_20"]) + 1e-8)
-
-    # MEAN REVERSION
-    out["z_score_20"] = (out["CLOSE"] - out["sma_20"]) / (out["CLOSE"].rolling(20).std() + 1e-8)
-    out["mean_reversion_signal"] = (out["z_score_20"].abs() > 2.0).astype(int)
-
-    # MOMENTUM confirmation
-    out["momentum_5"] = out["ret_5d"] / (out["volatility_20"] + 1e-8)
-    out["momentum_consistency"] = (out["ret_1d"] > 0).rolling(5).mean()
-
-    # CURRENCY effects (CBR USD/RUB)
+    # CURRENCY (CBR USD/RUB)
     if isinstance(usd, pd.Series) and not usd.empty:
         usd_df = usd.reset_index().rename(columns={"index": "date", "CBR_USD_RUB": "usd_rub"})
         usd_df["date"] = pd.to_datetime(usd_df["date"])
         out = pd.merge_asof(out.sort_values("date"), usd_df.sort_values("date"), on="date", direction="backward")
-        out["usd_ret_1d"] = out["usd_rub"].pct_change(1)
         out["usd_ret_5d"] = out["usd_rub"].pct_change(5)
-        out["currency_pressure"] = -(out["usd_ret_5d"])
     else:
-        out["usd_ret_1d"] = 0.0
         out["usd_ret_5d"] = 0.0
-        out["currency_pressure"] = 0.0
 
-    # MARKET microstructure proxies
-    out["bid_ask_proxy"] = (out["HIGH"] - out["LOW"]) / (out["CLOSE"] + 1e-12)
-    true_range = np.maximum(
-        out["HIGH"] - out["LOW"],
-        np.maximum(
-            (out["HIGH"] - out["CLOSE"].shift(1)).abs(),
-            (out["LOW"] - out["CLOSE"].shift(1)).abs(),
-        ),
-    )
-    atr = true_range.rolling(14).mean()
-    out["atr_ratio"] = true_range / (atr + 1e-8)
+    # PRICE POSITION
+    high_20 = out["HIGH"].rolling(20).max()
+    low_20 = out["LOW"].rolling(20).min()
+    out["price_position"] = (out["CLOSE"] - low_20) / ((high_20 - low_20) + 1e-8)
 
-    # cleanup intermediates
-    out = out.drop(
-        columns=[
-            "sma_5",
-            "sma_10",
-            "volume_sma",
-            "high_20",
-            "low_20",
-        ],
-        errors="ignore",
-    )
+    # Bollinger position
+    bb_mid = out["CLOSE"].rolling(20).mean()
+    bb_std = out["CLOSE"].rolling(20).std()
+    out["bb_position"] = (out["CLOSE"] - bb_mid) / ((2 * bb_std) + 1e-8)
 
     out = out.dropna().reset_index(drop=True)
     return out
 
 
 # ----------------------------
-# SEQUENCES
+# OPTIMIZED MODEL - SMALLER
 # ----------------------------
 
-def make_sequences_with_dates(
-    X: np.ndarray,
-    y: np.ndarray,
-    dates: np.ndarray,
-    fwd_ret: np.ndarray,
-    seq_len: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    Xs, ys, ds, rs = [], [], [], []
-    for i in range(seq_len, len(X)):
-        Xs.append(X[i - seq_len : i])
-        ys.append(y[i])
-        ds.append(dates[i])
-        rs.append(fwd_ret[i])
-    return np.asarray(Xs), np.asarray(ys), np.asarray(ds), np.asarray(rs)
-
-
-# ----------------------------
-# MODEL
-# ----------------------------
-
-def build_enhanced_model(n_features: int) -> tf.keras.Model:
+def build_optimized_model(n_features: int) -> tf.keras.Model:
     inputs = tf.keras.Input(shape=(CFG["SEQ_LEN"], n_features))
 
     x = tf.keras.layers.LSTM(
-        48,
+        32,
         return_sequences=True,
-        kernel_regularizer=tf.keras.regularizers.l2(1e-3),
-        dropout=0.3,
-        recurrent_dropout=0.2,
+        kernel_regularizer=tf.keras.regularizers.l2(5e-4),
+        recurrent_regularizer=tf.keras.regularizers.l2(5e-4),
+        dropout=0.4,
+        recurrent_dropout=0.3,
     )(inputs)
-    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.LayerNormalization()(x)
 
     x = tf.keras.layers.LSTM(
-        24,
-        kernel_regularizer=tf.keras.regularizers.l2(1e-3),
-        dropout=0.3,
-        recurrent_dropout=0.2,
+        16,
+        kernel_regularizer=tf.keras.regularizers.l2(5e-4),
+        recurrent_regularizer=tf.keras.regularizers.l2(5e-4),
+        dropout=0.4,
+        recurrent_dropout=0.3,
     )(x)
-    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.LayerNormalization()(x)
 
     x = tf.keras.layers.Dense(
-        16,
+        12,
         activation="relu",
-        kernel_regularizer=tf.keras.regularizers.l2(1e-3),
+        kernel_regularizer=tf.keras.regularizers.l2(5e-4),
     )(x)
     x = tf.keras.layers.Dropout(0.5)(x)
-
-    x = tf.keras.layers.Dense(
-        8,
-        activation="relu",
-        kernel_regularizer=tf.keras.regularizers.l2(1e-3),
-    )(x)
-    x = tf.keras.layers.Dropout(0.3)(x)
 
     outputs = tf.keras.layers.Dense(1, activation="sigmoid")(x)
 
@@ -409,7 +295,6 @@ def build_enhanced_model(n_features: int) -> tf.keras.Model:
         metrics=[
             "accuracy",
             tf.keras.metrics.AUC(name="auc_roc"),
-            tf.keras.metrics.AUC(name="auc_pr", curve="PR"),
             tf.keras.metrics.Precision(name="precision"),
             tf.keras.metrics.Recall(name="recall"),
         ],
@@ -417,26 +302,26 @@ def build_enhanced_model(n_features: int) -> tf.keras.Model:
     return model
 
 
-def get_enhanced_callbacks() -> list[tf.keras.callbacks.Callback]:
+def get_improved_callbacks() -> list[tf.keras.callbacks.Callback]:
     return [
         tf.keras.callbacks.EarlyStopping(
-            monitor="val_auc_roc",
+            monitor="val_accuracy",
             mode="max",
-            patience=15,
+            patience=25,
             restore_best_weights=True,
             verbose=1,
         ),
         tf.keras.callbacks.ReduceLROnPlateau(
-            monitor="val_auc_roc",
+            monitor="val_accuracy",
             mode="max",
-            factor=0.3,
-            patience=5,
-            min_lr=1e-7,
+            factor=0.5,
+            patience=8,
+            min_lr=1e-6,
             verbose=1,
         ),
         tf.keras.callbacks.ModelCheckpoint(
-            filepath="best_sonnet_model.keras",
-            monitor="val_auc_roc",
+            filepath="best_sonnet_v3.keras",
+            monitor="val_accuracy",
             mode="max",
             save_best_only=True,
             verbose=1,
@@ -455,51 +340,75 @@ class Dataset:
     fwd_ret: pd.Series
 
 
-def load_or_build_enhanced_dataset(secid: str) -> Dataset:
-    cache_file = _cache_path(f"enhanced_dataset_{secid}_v2.pkl")
+def load_or_build_v3_dataset(secid: str) -> Dataset:
+    cache_file = _cache_path(f"simple_dataset_{secid}_v3.pkl")
     if os.path.exists(cache_file):
         print("Loading cached dataset...")
         with open(cache_file, "rb") as f:
             df_feat = pickle.load(f)
     else:
-        print("Building new enhanced dataset...")
+        print("Building simple stable dataset...")
         df_price = fetch_moex_history(secid, CFG["START"], CFG["END"])
         usd = fetch_cbr_usdrub(CFG["START"], CFG["END"])
-        df_feat = add_enhanced_features(df_price, usd)
+        df_feat = add_stable_features(df_price, usd)
         with open(cache_file, "wb") as f:
             pickle.dump(df_feat, f)
 
-    y = make_smart_target(
-        df_feat["CLOSE"],
-        df_feat["VOLUME"],
-        int(CFG["TARGET_HORIZON_DAYS"]),
-        float(CFG["TARGET_UP_THRESHOLD"]),
-    )
+    y = make_simple_target(df_feat["CLOSE"], int(CFG["TARGET_HORIZON_DAYS"]), float(CFG["TARGET_UP_THRESHOLD"]))
     fret = make_forward_return(df_feat["CLOSE"], int(CFG["TARGET_HORIZON_DAYS"]))
     return Dataset(df_feat=df_feat, target=y, fwd_ret=fret)
 
 
+def make_sequences_with_dates(
+    X: np.ndarray,
+    y: np.ndarray,
+    dates: np.ndarray,
+    fwd_ret: np.ndarray,
+    seq_len: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    Xs, ys, ds, rs = [], [], [], []
+    for i in range(seq_len, len(X)):
+        Xs.append(X[i - seq_len : i])
+        ys.append(y[i])
+        ds.append(dates[i])
+        rs.append(fwd_ret[i])
+    return np.asarray(Xs), np.asarray(ys), np.asarray(ds), np.asarray(rs)
+
+
 def main() -> float:
-    print("ENHANCED SONNET MODEL v2.0")
+    print("SONNET MODEL v3.0 - simplified for stability")
     print("=" * 60)
 
     secid = CFG["TICKER"]
-    data = load_or_build_enhanced_dataset(secid)
+    data = load_or_build_v3_dataset(secid)
     df_feat = data.df_feat.copy()
 
     horizon = int(CFG["TARGET_HORIZON_DAYS"])
-
-    # Align: remove last horizon rows (target/returns are NaN there)
     df_feat = df_feat.iloc[:-horizon].reset_index(drop=True)
     y = data.target.iloc[:-horizon].astype(int).values
     fwd_ret = data.fwd_ret.iloc[:-horizon].astype(float).values
 
-    # feature cols: exclude raw price columns and merge helpers
-    exclude = {"date", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "VALUE", "usd_rub"}
-    feature_cols = [c for c in df_feat.columns if c not in exclude]
+    feature_cols = [
+        "ret_1d",
+        "ret_5d",
+        "ret_10d",
+        "ret_20d",
+        "log_ret",
+        "price_vs_sma20",
+        "price_vs_sma50",
+        "trend_up",
+        "rsi_14",
+        "macd_histogram",
+        "volatility_20",
+        "volume_ratio",
+        "usd_ret_5d",
+        "price_position",
+        "bb_position",
+    ]
+    feature_cols = [c for c in feature_cols if c in df_feat.columns]
 
-    print(f"Features used: {len(feature_cols)}")
-    print(f"Target balance: pos={y.mean():.3%} neg={(1 - y.mean()):.3%}")
+    print(f"Stable features: {len(feature_cols)}")
+    print(f"Target balance: {y.mean():.3%} positive / {(1 - y.mean()):.3%} negative")
 
     X = df_feat[feature_cols].values
     dates = pd.to_datetime(df_feat["date"]).values
@@ -510,7 +419,6 @@ def main() -> float:
     d_train_raw, d_test_raw = dates[:split], dates[split:]
     r_train_raw, r_test_raw = fwd_ret[:split], fwd_ret[split:]
 
-    # Train/Val time split inside train
     val_frac = float(CFG["VAL_SPLIT"])
     val_cut = int(len(X_train_raw) * (1.0 - val_frac))
     X_tr_raw, X_val_raw = X_train_raw[:val_cut], X_train_raw[val_cut:]
@@ -523,39 +431,21 @@ def main() -> float:
     X_val_scaled = scaler.transform(X_val_raw)
     X_test_scaled = scaler.transform(X_test_raw)
 
-    X_tr, y_tr, d_tr, r_tr = make_sequences_with_dates(
-        X_tr_scaled,
-        y_tr_raw,
-        d_tr_raw,
-        r_tr_raw,
-        int(CFG["SEQ_LEN"]),
-    )
-    X_val, y_val, d_val, r_val = make_sequences_with_dates(
-        X_val_scaled,
-        y_val_raw,
-        d_val_raw,
-        r_val_raw,
-        int(CFG["SEQ_LEN"]),
-    )
-    X_test, y_test, d_test, r_test = make_sequences_with_dates(
-        X_test_scaled,
-        y_test_raw,
-        d_test_raw,
-        r_test_raw,
-        int(CFG["SEQ_LEN"]),
-    )
+    X_tr, y_tr, d_tr, r_tr = make_sequences_with_dates(X_tr_scaled, y_tr_raw, d_tr_raw, r_tr_raw, int(CFG["SEQ_LEN"]))
+    X_val, y_val, d_val, r_val = make_sequences_with_dates(X_val_scaled, y_val_raw, d_val_raw, r_val_raw, int(CFG["SEQ_LEN"]))
+    X_test, y_test, d_test, r_test = make_sequences_with_dates(X_test_scaled, y_test_raw, d_test_raw, r_test_raw, int(CFG["SEQ_LEN"]))
 
-    print(f"Sequence shapes: train={X_tr.shape}, val={X_val.shape}, test={X_test.shape}")
+    print(f"Sequences - Train: {X_tr.shape}, Val: {X_val.shape}, Test: {X_test.shape}")
 
     unique_classes = np.unique(y_tr)
-    cw_vals = compute_class_weight(class_weight="balanced", classes=unique_classes, y=y_tr)
-    class_weight = {int(c): float(w) for c, w in zip(unique_classes, cw_vals)}
-    print("class_weight:", class_weight)
+    cw_vals = compute_class_weight("balanced", classes=unique_classes, y=y_tr)
+    class_weight = {int(cls): float(weight) for cls, weight in zip(unique_classes, cw_vals)}
+    print("Class weights:", class_weight)
 
-    model = build_enhanced_model(X_tr.shape[-1])
-    model.summary()
+    model = build_optimized_model(X_tr.shape[-1])
+    print(f"Model parameters: {model.count_params():,}")
 
-    callbacks = get_enhanced_callbacks()
+    callbacks = get_improved_callbacks()
 
     history = model.fit(
         X_tr,
@@ -566,15 +456,27 @@ def main() -> float:
         class_weight=class_weight,
         callbacks=callbacks,
         shuffle=False,  # time-series safety
-        verbose=1,
+        verbose=2,
     )
 
-    # load best weights if checkpoint exists
-    if os.path.exists("best_sonnet_model.keras"):
-        model = tf.keras.models.load_model("best_sonnet_model.keras")
+    if os.path.exists("best_sonnet_v3.keras"):
+        model = tf.keras.models.load_model("best_sonnet_v3.keras")
+
+    # threshold tuning on validation
+    prob_val = model.predict(X_val, verbose=0).reshape(-1)
+    best_thr = 0.5
+    best_acc = -1.0
+    for thr in np.arange(0.30, 0.81, 0.05):
+        pred_val = (prob_val >= thr).astype(int)
+        acc_val = float(accuracy_score(y_val, pred_val))
+        if acc_val > best_acc:
+            best_acc = acc_val
+            best_thr = float(thr)
+
+    print(f"Best threshold (val): {best_thr:.2f} (val_acc={best_acc:.1%})")
 
     proba = model.predict(X_test, verbose=0).reshape(-1)
-    pred = (proba >= float(CFG["BEST_THR"])).astype(int)
+    pred = (proba >= best_thr).astype(int)
 
     acc = float(accuracy_score(y_test, pred))
     bal_acc = float(balanced_accuracy_score(y_test, pred))
@@ -582,31 +484,28 @@ def main() -> float:
     auc = float(roc_auc_score(y_test, proba)) if len(np.unique(y_test)) > 1 else float("nan")
 
     print("\n" + "=" * 60)
-    print("ENHANCED SONNET RESULTS")
+    print("SONNET v3.0 RESULTS")
     print("=" * 60)
+
     print(f"Accuracy: {acc:.3%}")
-    print(f"Balanced Accuracy: {bal_acc:.3%}")
+    print(f"Balanced Acc: {bal_acc:.3%}")
     print(f"F1: {f1:.4f}")
     print(f"AUC-ROC: {auc:.4f}" if np.isfinite(auc) else "AUC-ROC: n/a")
     print(f"MCC: {matthews_corrcoef(y_test, pred) if len(np.unique(pred)) > 1 else 0.0:.4f}")
     print(f"AP: {average_precision_score(y_test, proba) if len(np.unique(y_test)) > 1 else float('nan'):.4f}")
+
     print("\nConfusion matrix:\n", confusion_matrix(y_test, pred))
     print("\nClassification report:\n", classification_report(y_test, pred, zero_division=0))
 
-    model.save("enhanced_sonnet_final.keras")
-    with open("enhanced_sonnet_scaler.pkl", "wb") as f:
+    model.save("sonnet_v3_final.keras")
+    with open("sonnet_v3_scaler.pkl", "wb") as f:
         pickle.dump(scaler, f)
 
-    print("\nSaved: enhanced_sonnet_final.keras and enhanced_sonnet_scaler.pkl")
-
-    # lightweight train dynamics summary
-    if "val_auc_roc" in history.history:
-        best_val = max(history.history["val_auc_roc"])
-        print(f"Best val AUC-ROC: {best_val:.4f}")
+    print("Saved: sonnet_v3_final.keras and sonnet_v3_scaler.pkl")
 
     return acc
 
 
 if __name__ == "__main__":
     final_accuracy = main()
-    print(f"\nFINAL ACCURACY: {final_accuracy:.3%}")
+    print(f"FINAL SONNET v3.0 ACCURACY: {final_accuracy:.1%}")

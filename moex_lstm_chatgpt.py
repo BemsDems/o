@@ -1,3 +1,4 @@
+# chat gpt
 # Colab-ready: MOEX/CBR feature engineering + LSTM classifier (ChatGPT variant)
 # Goal: run end-to-end in one notebook/script.
 #

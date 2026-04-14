@@ -19,7 +19,7 @@ import tensorflow as tf
 
 from moexalgo import Ticker
 
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
@@ -403,9 +403,19 @@ def pick_threshold_on_val(
         )
 
     tab = pd.DataFrame(rows).sort_values("thr").reset_index(drop=True)
-    thr_f1 = float(tab.iloc[tab["f1_class1"].values.argmax()]["thr"])
-    thr_pnl = float(tab.iloc[tab["avg_trade_ret_nonoverlap"].values.argmax()]["thr"])
-    return thr_f1, thr_pnl, tab
+
+    # feasible = not those where we forced -1e9
+    tab_feas = tab[tab["avg_trade_ret_nonoverlap"] > -1e8].copy()
+
+    if tab_feas.empty:
+        # if no threshold passed constraints, fall back to 0.50
+        thr_f1 = 0.50
+        thr_pnl = 0.50
+    else:
+        thr_f1 = float(tab_feas.iloc[tab_feas["f1_class1"].values.argmax()]["thr"])
+        thr_pnl = float(tab_feas.iloc[tab_feas["avg_trade_ret_nonoverlap"].values.argmax()]["thr"])
+
+    return float(thr_f1), float(thr_pnl), tab
 
 
 def eval_block(name: str, y_true: np.ndarray, prob: np.ndarray, thr: float):
@@ -618,6 +628,9 @@ print("Div rows:", len(divs))
 print("\nBuilding features (Russian sources only)...")
 feat = build_features(sber, usd, imo, key_rate, divs)
 feat = add_target(feat, CFG["HORIZON"], CFG["THR_MOVE"])
+
+# Optional (drift reduction): train/val/test on a fresher regime only
+# feat = feat.loc["2019-01-01":].copy()
 print("Final dataset:", feat.shape)
 print("Class share (BUY=1):", float(feat["Target"].mean().round(3)))
 
@@ -658,7 +671,7 @@ print(FEATURES)
 
 train_idx, val_idx, test_idx = time_splits(feat, CFG["TRAIN_FRAC"], CFG["VAL_FRAC"])
 
-scaler = StandardScaler()
+scaler = RobustScaler()
 X_all_2d = feat[FEATURES].values
 y_all = feat["Target"].values.astype(int)
 dates_all = feat.index.values
@@ -765,6 +778,73 @@ print(f"Chosen threshold (VAL max avg PnL): {thr_pnl:.2f}")
 
 eval_block("TEST (thr_f1)", y_test, prob_test, thr_f1)
 eval_block("TEST (thr_pnl)", y_test, prob_test, thr_pnl)
+
+
+
+def backtest_nonoverlap_long_only(prob, dates_signal, close_full, thr, horizon, fee):
+    dates = pd.to_datetime(dates_signal)
+    close_full = close_full.copy()
+    close_full.index = pd.to_datetime(close_full.index)
+
+    # Buy&Hold on the same segment
+    start_date = dates[0]
+    last_date = dates[-1]
+    try:
+        last_loc = close_full.index.get_loc(last_date)
+        end_loc = min(last_loc + horizon, len(close_full.index) - 1)
+        end_date = close_full.index[end_loc]
+    except KeyError:
+        end_date = close_full.index[-1]
+
+    bh_ret = float(close_full.loc[end_date] / close_full.loc[start_date] - 1.0)
+
+    eq = 1.0
+    trades = []
+    i = 0
+    while i < len(prob):
+        if prob[i] >= thr:
+            d0 = dates[i]
+            try:
+                loc0 = close_full.index.get_loc(d0)
+            except KeyError:
+                i += 1
+                continue
+
+            loc1 = loc0 + horizon
+            if loc1 >= len(close_full.index):
+                break
+
+            entry = float(close_full.iloc[loc0])
+            exitp = float(close_full.iloc[loc1])
+            ret = exitp / entry - 1.0 - fee
+
+            eq *= (1.0 + ret)
+            trades.append(ret)
+            i += horizon
+        else:
+            i += 1
+
+    strat_ret = float(eq - 1.0)
+    n_trades = int(len(trades))
+    winrate = float(np.mean(np.array(trades) > 0)) if n_trades else 0.0
+
+    print("\n" + "=" * 70)
+    print(f"BACKTEST (Close, non-overlap) | thr={thr:.2f} horizon={horizon} fee={fee:.2%}")
+    print("=" * 70)
+    print(f"Strategy return: {strat_ret:+.2%}")
+    print(f"Buy&Hold return: {bh_ret:+.2%}")
+    print(f"Alpha: {(strat_ret - bh_ret):+.2%}")
+    print(f"Trades: {n_trades} | WinRate: {winrate:.1%}")
+
+    return strat_ret, bh_ret, n_trades, winrate
+
+
+# test window end dates
+_dates_test = dw[test_mask]
+_close_full = sber["Close"]
+
+backtest_nonoverlap_long_only(prob_test, _dates_test, _close_full, thr_f1, CFG["HORIZON"], CFG["FEE"])
+backtest_nonoverlap_long_only(prob_test, _dates_test, _close_full, thr_pnl, CFG["HORIZON"], CFG["FEE"])
 
 model.save("lstm_ru_model.keras")
 with open("lstm_ru_scaler.pkl", "wb") as f:

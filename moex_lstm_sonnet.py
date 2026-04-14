@@ -1,393 +1,580 @@
-"""Colab-ready: Fundamental/Macro data loaders with SAFE execution (Sonnet variant).
-
-NOTE: This file used to contain an LSTM pipeline. Per request, the full content
-of `colab_macro_loaders_sonnet.py` was moved here.
-
-Goal: run all blocks; any block failure prints error and continues.
-
-Sources / blocks:
-- MOEX ISS (description, dividends, splits, last price)
-- CBR USD/RUB daily series and key rate table
-- Yahoo Finance fundamentals via `yfinance` (optional)
-- Optional APIs: Alpha Vantage, Financial Modeling Prep, EODHD (API keys optional)
-- e-disclosure.ru search template (best-effort)
-
-In Colab you may need:
-    pip install yfinance beautifulsoup4 lxml pandas numpy requests
-
-Env vars (optional):
-- ALPHAVANTAGE_API_KEY
-- FMP_API_KEY
-- EODHD_API_KEY
-
-"""
+# Colab-ready: MOEX/CBR feature engineering + LSTM classifier (Sonnet fixed)
+# Fixes requested:
+# 1) First LSTM uses return_sequences=True (explicit)
+# 2) (Optional) Dividends are already merged via merge_asof in past-only manner
+#
+# In Colab:
+# !pip -q install moexalgo requests pandas numpy scikit-learn tensorflow lxml html5lib
 
 from __future__ import annotations
 
 import os
-import traceback
-from typing import Any, Callable, Dict, Optional
+import pickle
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
 import requests
+import tensorflow as tf
 
-pd.set_option("display.max_columns", 200)
-pd.set_option("display.width", 160)
+from moexalgo import Ticker
 
-SESSION = requests.Session()
-SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (Colab; +https://colab.research.google.com)",
-})
-TIMEOUT_SECONDS = 30
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    f1_score,
+    confusion_matrix,
+    classification_report,
+    roc_auc_score,
+    matthews_corrcoef,
+    average_precision_score,
+)
+from sklearn.utils.class_weight import compute_class_weight
 
+# ----------------------------
+# CONFIG
+# ----------------------------
+CFG: Dict[str, Any] = {
+    "TICKER": "SBER",
+    "START": "2015-01-01",
+    "END": "2025-12-31",
 
-# -----------------------------
-# SAFE helpers
-# -----------------------------
+    "HORIZON": 5,        # target horizon in trading days
+    "THR_MOVE": 0.015,   # target: future_return > 1.5%
 
-def log(msg: str) -> None:
-    print(msg)
+    "WINDOW": 30,
 
+    # time split (by dates order)
+    "TRAIN_FRAC": 0.70,
+    "VAL_FRAC": 0.15,  # rest goes to test
 
-def safe_run(title: str, fn: Callable[[], Any], default: Any = None) -> Any:
-    """Runs fn() safely.
+    # training
+    "EPOCHS": 200,
+    "BATCH": 32,
+    "LR": 1e-3,
+    "PATIENCE": 15,
 
-    If error -> prints stack trace and returns default.
-    """
+    # model
+    "LSTM_UNITS_1": 64,
+    "LSTM_UNITS_2": 32,
+    "DROPOUT": 0.25,
+    "L2": 1e-4,
 
-    log(f"\n=== {title} ===")
-    try:
-        out = fn()
-        log(f"[OK] {title}")
-        return out
-    except Exception as e:  # noqa: BLE001
-        log(f"[ERROR] {title}: {type(e).__name__}: {e}")
-        log(traceback.format_exc())
-        return default
+    # backtest assumptions (simple)
+    "FEE": 0.001,        # 0.1% per trade (simplified)
+    "NON_OVERLAP": True, # skip next HORIZON days after entry
+}
 
+np.random.seed(42)
+tf.random.set_seed(42)
 
-def _safe_get(url: str, params: Optional[Dict[str, Any]] = None, *, expect_json: bool = True) -> Any:
-    r = SESSION.get(url, params=params, timeout=TIMEOUT_SECONDS)
-    r.raise_for_status()
-    return r.json() if expect_json else r.text
-
-
-def _iss_to_df(payload: Any, block_name: str) -> pd.DataFrame:
-    if not isinstance(payload, dict) or block_name not in payload:
-        return pd.DataFrame()
-    block = payload[block_name]
-    if not isinstance(block, dict) or "columns" not in block or "data" not in block:
-        return pd.DataFrame()
-    return pd.DataFrame(block["data"], columns=block["columns"])
-
-
-def show_df(df: Any, name: str, n: int = 10) -> None:
-    if df is None:
-        log(f"[{name}] -> None")
-        return
-    if not isinstance(df, pd.DataFrame):
-        log(f"[{name}] -> type={type(df)}")
-        return
-    log(f"[{name}] -> shape={df.shape}")
-    if not df.empty:
-        print(df.head(n).to_string(index=False))
-
-
-# -----------------------------
-# 1) MOEX ISS (official)
-# -----------------------------
-
-def moex_iss_security_description(secid: str) -> pd.DataFrame:
-    url = f"https://iss.moex.com/iss/securities/{secid}.json"
-    j = _safe_get(url, params={"iss.meta": "off"})
-    return _iss_to_df(j, "description")
+# ----------------------------
+# 1) DATA LOADERS (Russian sources)
+# ----------------------------
+def load_candles_moexalgo(ticker: str, start: str, end: str, period: str = "1D") -> pd.DataFrame:
+    df = pd.DataFrame(Ticker(ticker).candles(start=start, end=end, period=period))
+    if df.empty:
+        return df
+    df["begin"] = pd.to_datetime(df["begin"])
+    df = df.drop_duplicates(subset=["begin"]).set_index("begin").sort_index()
+    df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"})
+    return df[["Open", "High", "Low", "Close", "Volume"]]
 
 
-def moex_iss_dividends(secid: str) -> pd.DataFrame:
-    url = (
-        "https://iss.moex.com/iss/statistics/engines/stock/markets/shares/"
-        f"securities/{secid}/dividends.json"
-    )
-    j = _safe_get(url, params={"iss.meta": "off", "iss.only": "dividends"})
-    return _iss_to_df(j, "dividends")
-
-
-def moex_iss_splits(secid: str) -> pd.DataFrame:
-    url = (
-        "https://iss.moex.com/iss/statistics/engines/stock/markets/shares/"
-        f"securities/{secid}/splits.json"
-    )
-    j = _safe_get(url, params={"iss.meta": "off", "iss.only": "splits"})
-    return _iss_to_df(j, "splits")
-
-
-def moex_iss_last_price(secid: str) -> Optional[float]:
-    url = f"https://iss.moex.com/iss/engines/stock/markets/shares/securities/{secid}.json"
-    j = _safe_get(url, params={"iss.meta": "off", "iss.only": "marketdata"})
-    md = _iss_to_df(j, "marketdata")
-    if md.empty:
-        return None
-
-    for col in ["LAST", "LCURRENTPRICE", "LEGALCLOSEPRICE"]:
-        if col in md.columns and pd.notna(md.loc[0, col]):
-            return float(md.loc[0, col])
-    return None
-
-
-# -----------------------------
-# 2) CBR (macro): USD/RUB series + key rate table
-# -----------------------------
-
-def cbr_usdrub_daily(start: str = "2020-01-01", end: Optional[str] = None) -> pd.Series:
-    import datetime as dt
-    from xml.etree import ElementTree as ET
-
-    if end is None:
-        end = dt.date.today().strftime("%Y-%m-%d")
-
-    start_dt = pd.to_datetime(start).strftime("%d/%m/%Y")
-    end_dt = pd.to_datetime(end).strftime("%d/%m/%Y")
-
-    url = "https://www.cbr.ru/scripts/XML_dynamic.asp"
-    xml = _safe_get(
-        url,
-        params={"date_req1": start_dt, "date_req2": end_dt, "VAL_NM_RQ": "R01235"},
-        expect_json=False,
-    )
-
-    root = ET.fromstring(xml)
-    rows = []
-    for rec in root.findall("Record"):
-        d = rec.attrib.get("Date")
-        v = rec.findtext("Value")
-        if d and v:
-            rows.append((pd.to_datetime(d, dayfirst=True), float(v.replace(",", "."))))
-
-    s = pd.Series(dict(rows)).sort_index()
-    s.name = "CBR_USD_RUB"
-    return s
-
-
-def cbr_key_rate_table() -> pd.DataFrame:
+def cbr_key_rate_range(start: str, end: str) -> pd.DataFrame:
+    """CBR key rate history within a range. Returns daily table (date, key_rate)."""
     url = "https://www.cbr.ru/hd_base/KeyRate/"
-    html = _safe_get(url, expect_json=False)
-
-    tables = pd.read_html(html)
+    params = {
+        "UniDbQuery.Posted": "True",
+        "UniDbQuery.From": pd.to_datetime(start).strftime("%d.%m.%Y"),
+        "UniDbQuery.To": pd.to_datetime(end).strftime("%d.%m.%Y"),
+    }
+    html = requests.get(url, params=params, timeout=30).text
+    tables = pd.read_html(html, decimal=",", thousands=" ")
     if not tables:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["date", "key_rate"])
 
     df = tables[0].copy()
     df.columns = [str(c).strip() for c in df.columns]
 
-    date_col = None
-    rate_col = None
-    for col in df.columns:
-        if date_col is None and "дата" in col.lower():
-            date_col = col
-        if rate_col is None and "став" in col.lower():
-            rate_col = col
-
+    date_col = next((c for c in df.columns if "дата" in c.lower()), None)
+    rate_col = next((c for c in df.columns if "став" in c.lower()), None)
     if date_col is None or rate_col is None:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["date", "key_rate"])
 
     df[date_col] = pd.to_datetime(df[date_col], dayfirst=True, errors="coerce")
-    df[rate_col] = pd.to_numeric(df[rate_col].astype(str).str.replace(",", "."), errors="coerce")
+    df[rate_col] = (
+        df[rate_col]
+        .astype(str)
+        .str.replace("%", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .str.replace("\xa0", "", regex=False)
+        .str.strip()
+    )
+    df[rate_col] = pd.to_numeric(df[rate_col], errors="coerce")
     df = df.dropna().sort_values(date_col).reset_index(drop=True)
-    return df.rename(columns={date_col: "date", rate_col: "key_rate"})
+    df = df.rename(columns={date_col: "date", rate_col: "key_rate"})
+
+    if not df.empty and df["key_rate"].max() > 100:
+        df["key_rate"] = df["key_rate"] / 100.0
+
+    return df
 
 
-# -----------------------------
-# 3) Yahoo via yfinance (optional; may be sparse for MOEX)
-# -----------------------------
+def moex_iss_dividends(ticker: str) -> pd.DataFrame:
+    """Best-effort dividends via MOEX ISS."""
+    url = f"https://iss.moex.com/iss/securities/{ticker}/dividends.json"
+    j = requests.get(url, params={"iss.meta": "off"}, timeout=30).json()
 
-def yahoo_fundamentals(yahoo_ticker: str) -> Dict[str, Any]:
-    import yfinance as yf
+    div = j.get("dividends", {})
+    if not div or not div.get("data"):
+        return pd.DataFrame(columns=["date", "dividend_rub", "currency"])
 
-    t = yf.Ticker(yahoo_ticker)
+    df = pd.DataFrame(div["data"], columns=div["columns"])
+    if "registryclosedate" not in df.columns or "value" not in df.columns:
+        return pd.DataFrame(columns=["date", "dividend_rub", "currency"])
 
-    out: Dict[str, Any] = {}
-
-    # info
-    try:
-        out["info"] = t.info
-    except Exception as e:  # noqa: BLE001
-        out["info_error"] = str(e)
-
-    # statements
-    for name, attr in [("financials", "financials"), ("balance_sheet", "balance_sheet"), ("cashflow", "cashflow")]:
-        try:
-            df = getattr(t, attr)
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                out[name] = df
-        except Exception:
-            pass
-
+    out = (
+        pd.DataFrame(
+            {
+                "date": pd.to_datetime(df["registryclosedate"], errors="coerce"),
+                "dividend_rub": pd.to_numeric(df["value"], errors="coerce"),
+                "currency": df.get("currencyid", "RUB"),
+            }
+        )
+        .dropna()
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
     return out
 
 
-# -----------------------------
-# 4) Alpha Vantage (needs API key)
-# -----------------------------
-
-def alphavantage_overview(symbol: str, api_key: str) -> Dict[str, Any]:
-    url = "https://www.alphavantage.co/query"
-    params = {"function": "OVERVIEW", "symbol": symbol, "apikey": api_key}
-    return _safe_get(url, params=params, expect_json=True)
-
-
-# -----------------------------
-# 5) Financial Modeling Prep (needs API key)
-# -----------------------------
-
-def fmp_profile(symbol: str, api_key: str) -> pd.DataFrame:
-    url = f"https://financialmodelingprep.com/api/v3/profile/{symbol}"
-    j = _safe_get(url, params={"apikey": api_key}, expect_json=True)
-    return pd.DataFrame(j)
+# ----------------------------
+# 2) FEATURE ENGINEERING
+# ----------------------------
+def rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0).rolling(period).mean()
+    loss = (-delta.where(delta < 0, 0.0)).rolling(period).mean()
+    rs = gain / (loss + 1e-12)
+    return 100 - (100 / (1 + rs))
 
 
-def fmp_ratios(symbol: str, api_key: str, limit: int = 40) -> pd.DataFrame:
-    url = f"https://financialmodelingprep.com/api/v3/ratios/{symbol}"
-    j = _safe_get(url, params={"apikey": api_key, "limit": limit}, expect_json=True)
-    return pd.DataFrame(j)
+def add_dividend_past_only_features(df: pd.DataFrame, div: pd.DataFrame) -> pd.DataFrame:
+    """Non-leaky: only last known dividend (as-of merge backward)."""
+    out = df.copy().sort_index()
+
+    tmp = out.reset_index().rename(columns={out.reset_index().columns[0]: "date"})
+    tmp["date"] = pd.to_datetime(tmp["date"])
+
+    tmp["last_dividend"] = 0.0
+    tmp["days_since_last_dividend"] = 9999.0
+    tmp["last_div_yield_approx"] = 0.0
+
+    if div is None or div.empty:
+        return tmp.set_index("date")
+
+    div2 = div[["date", "dividend_rub"]].dropna().copy()
+    div2["date"] = pd.to_datetime(div2["date"])
+    div2 = div2.sort_values("date").drop_duplicates(subset=["date"])
+    div2["last_div_date"] = div2["date"]
+
+    tmp = tmp.sort_values("date")
+    merged = pd.merge_asof(
+        tmp,
+        div2[["date", "dividend_rub", "last_div_date"]],
+        on="date",
+        direction="backward",
+    )
+
+    merged["last_dividend"] = pd.to_numeric(merged["dividend_rub"], errors="coerce").fillna(0.0)
+    merged["days_since_last_dividend"] = (merged["date"] - merged["last_div_date"]).dt.days
+    merged["days_since_last_dividend"] = merged["days_since_last_dividend"].fillna(9999.0)
+
+    merged["last_div_yield_approx"] = merged["last_dividend"] / merged["Close"].replace(0, np.nan)
+    merged["last_div_yield_approx"] = merged["last_div_yield_approx"].fillna(0.0)
+
+    merged = merged.drop(columns=["dividend_rub", "last_div_date"], errors="ignore")
+    merged = merged.set_index("date").sort_index()
+    return merged
 
 
-# -----------------------------
-# 6) EODHD fundamentals (needs API key)
-# -----------------------------
+def build_features(
+    base: pd.DataFrame,
+    usd: pd.DataFrame,
+    imoex: pd.DataFrame,
+    key_rate_df: pd.DataFrame,
+    div_df: pd.DataFrame,
+) -> pd.DataFrame:
+    df = base.copy()
 
-def eodhd_fundamentals(symbol_with_exchange: str, api_key: str) -> Dict[str, Any]:
-    url = f"https://eodhd.com/api/fundamentals/{symbol_with_exchange}"
-    return _safe_get(url, params={"api_token": api_key, "fmt": "json"}, expect_json=True)
+    df = df.join(usd[["Close"]].rename(columns={"Close": "USD"}), how="left")
+    df["USD"] = df["USD"].ffill()
+    df = df.join(imoex[["Close"]].rename(columns={"Close": "IMOEX"}), how="left")
+    df["IMOEX"] = df["IMOEX"].ffill()
 
+    df["ret_1"] = df["Close"].pct_change()
+    df["ret_2"] = df["Close"].pct_change(2)
+    df["ret_5"] = df["Close"].pct_change(5)
 
-# -----------------------------
-# 7) e-disclosure.ru (template; may break if site changes)
-# -----------------------------
+    df["usd_ret_1"] = df["USD"].pct_change()
+    df["imoex_ret_1"] = df["IMOEX"].pct_change()
 
-def edisclosure_search(query: str) -> pd.DataFrame:
-    # Best-effort template.
-    from bs4 import BeautifulSoup
+    df["vol_20"] = df["ret_1"].rolling(20).std()
+    df["vol_60"] = df["ret_1"].rolling(60).std()
+    df["vol_rel"] = df["Volume"] / (df["Volume"].rolling(20).mean() + 1e-12)
 
-    url = "https://www.e-disclosure.ru/poisk-po-kompaniyam"
-    html = _safe_get(url, params={"query": query}, expect_json=False)
+    df["sma_20"] = df["Close"].rolling(20).mean()
+    df["sma_50"] = df["Close"].rolling(50).mean()
+    df["sma_200"] = df["Close"].rolling(200).mean()
 
-    soup = BeautifulSoup(html, "lxml")
-    links = []
-    for a in soup.select("a[href]"):
-        href = a.get("href", "")
-        text = a.get_text(" ", strip=True)
-        if "/portal/company.aspx?id=" in href:
-            links.append({"name": text, "url": "https://www.e-disclosure.ru" + href})
+    df["dist_sma20"] = df["Close"] / df["sma_20"] - 1.0
+    df["dist_sma50"] = df["Close"] / df["sma_50"] - 1.0
+    df["trend_up_200"] = (df["Close"] > df["sma_200"]).astype(int)
 
-    return pd.DataFrame(links).drop_duplicates()
+    df["rsi_14"] = rsi(df["Close"], 14)
 
+    df["ret_10"] = df["Close"].pct_change(10)
+    df["ret_20"] = df["Close"].pct_change(20)
+    df["log_ret"] = np.log(df["Close"] / df["Close"].shift(1))
 
-def main() -> None:
-    # -----------------------------
-    # RUN ALL BLOCKS (errors won't stop execution)
-    # -----------------------------
-    secid = "SBER"  # MOEX SECID
-    yahoo = "SBER.ME"  # Yahoo ticker
+    df["usd_ret_5"] = df["USD"].pct_change(5)
+    df["imoex_ret_5"] = df["IMOEX"].pct_change(5)
+    df["imoex_ret_20"] = df["IMOEX"].pct_change(20)
+    df["sber_vs_imoex_5"] = df["ret_5"] - df["imoex_ret_5"]
 
-    av_key = os.getenv("ALPHAVANTAGE_API_KEY")  # optional
-    fmp_key = os.getenv("FMP_API_KEY")  # optional
-    eod_key = os.getenv("EODHD_API_KEY")  # optional
+    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
+    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
+    df["macd"] = ema12 - ema26
+    df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+    df["macd_hist"] = df["macd"] - df["macd_signal"]
+    df["macd_cross"] = (df["macd"] > df["macd_signal"]).astype(int)
 
-    # --- MOEX ISS ---
-    sec_desc = safe_run("MOEX: Security description", lambda: moex_iss_security_description(secid), default=pd.DataFrame())
-    show_df(sec_desc, "MOEX description", n=15)
+    bb_mid = df["Close"].rolling(20).mean()
+    bb_std = df["Close"].rolling(20).std()
+    bb_up = bb_mid + 2 * bb_std
+    bb_low = bb_mid - 2 * bb_std
+    df["bb_width"] = (bb_up - bb_low) / bb_mid
+    df["bb_pos"] = (df["Close"] - bb_low) / (bb_up - bb_low).replace(0, np.nan)
 
-    divs = safe_run("MOEX: Dividends", lambda: moex_iss_dividends(secid), default=pd.DataFrame())
-    show_df(divs, "MOEX dividends", n=10)
+    tr = pd.concat(
+        [
+            (df["High"] - df["Low"]),
+            (df["High"] - df["Close"].shift(1)).abs(),
+            (df["Low"] - df["Close"].shift(1)).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    df["atr_14"] = tr.rolling(14).mean()
+    df["atr_rel"] = df["atr_14"] / df["Close"]
 
-    splits = safe_run("MOEX: Splits", lambda: moex_iss_splits(secid), default=pd.DataFrame())
-    show_df(splits, "MOEX splits", n=10)
+    df["vol_5"] = df["ret_1"].rolling(5).std()
+    df["vol_ratio_5_20"] = df["vol_5"] / (df["vol_20"] + 1e-12)
+    df["vol_spike"] = (df["vol_rel"] > 2.0).astype(int)
 
-    last_price = safe_run("MOEX: Last price", lambda: moex_iss_last_price(secid), default=None)
-    log(f"[MOEX last price] {last_price}")
+    df2 = df.reset_index().rename(columns={df.reset_index().columns[0]: "date"})
+    df2["date"] = pd.to_datetime(df2["date"])
 
-    # --- CBR macro ---
-    usdrub = safe_run("CBR: USD/RUB daily series", lambda: cbr_usdrub_daily("2020-01-01"), default=pd.Series(dtype=float))
-    if isinstance(usdrub, pd.Series) and not usdrub.empty:
-        log(f"[CBR_USD_RUB] points={len(usdrub)} last5:")
-        print(usdrub.tail(5))
-
-    keyrate = safe_run("CBR: Key rate table", cbr_key_rate_table, default=pd.DataFrame())
-    show_df(keyrate, "CBR key rate", n=10)
-
-    # --- Yahoo fundamentals ---
-    yf_data = safe_run("Yahoo (yfinance): fundamentals", lambda: yahoo_fundamentals(yahoo), default={})
-    if isinstance(yf_data, dict) and yf_data:
-        info = yf_data.get("info", {})
-        if isinstance(info, dict) and info:
-            keys = [
-                "shortName",
-                "longName",
-                "currency",
-                "exchange",
-                "quoteType",
-                "marketCap",
-                "enterpriseValue",
-                "trailingPE",
-                "forwardPE",
-                "priceToBook",
-                "dividendYield",
-                "trailingAnnualDividendRate",
-                "trailingAnnualDividendYield",
-                "beta",
-                "profitMargins",
-                "operatingMargins",
-                "totalRevenue",
-                "grossProfits",
-                "ebitda",
-                "netIncomeToCommon",
-                "returnOnEquity",
-                "debtToEquity",
-            ]
-            log("yfinance info (selected keys):")
-            print({k: info.get(k, None) for k in keys})
-        else:
-            log("yfinance: .info пустой/недоступен для этого тикера.")
-
-        for k in ["financials", "balance_sheet", "cashflow"]:
-            dfk = yf_data.get(k)
-            if isinstance(dfk, pd.DataFrame) and not dfk.empty:
-                log(f"\n[{k}] shape={dfk.shape}")
-                print(dfk.head().to_string())
+    if key_rate_df is not None and not key_rate_df.empty:
+        kr = key_rate_df[["date", "key_rate"]].copy()
+        kr["date"] = pd.to_datetime(kr["date"])
+        df2 = df2.sort_values("date")
+        kr = kr.sort_values("date")
+        df2 = pd.merge_asof(df2, kr, on="date", direction="backward")
     else:
-        log("yfinance: данных нет (или блок упал и вернул default).")
+        df2["key_rate"] = np.nan
 
-    # --- Optional APIs (won't crash if no keys) ---
-    safe_run(
-        "AlphaVantage: OVERVIEW (optional)",
-        lambda: alphavantage_overview("SBER.ME", av_key) if av_key else "SKIP (no ALPHAVANTAGE_API_KEY)",
-        default="SKIP/ERROR",
+    df2 = df2.set_index("date")
+    df2["key_rate"] = df2["key_rate"].ffill()
+    df2["key_rate_chg"] = df2["key_rate"].diff()
+    df2["rate_rising"] = (df2["key_rate_chg"] > 0).astype(int)
+
+    df2 = add_dividend_past_only_features(df2, div_df)
+
+    df2 = df2.dropna()
+    return df2
+
+
+# ----------------------------
+# 3) TARGET + SPLITS
+# ----------------------------
+def add_target(df: pd.DataFrame, horizon: int, thr_move: float) -> pd.DataFrame:
+    out = df.copy()
+    out["future_ret"] = out["Close"].shift(-horizon) / out["Close"] - 1.0
+    out["Target"] = (out["future_ret"] > thr_move).astype(int)
+    out = out.dropna()
+    return out
+
+
+def time_splits(df: pd.DataFrame, train_frac: float = 0.7, val_frac: float = 0.15):
+    n = len(df)
+    train_end = int(n * train_frac)
+    val_end = int(n * (train_frac + val_frac))
+    train_idx = df.index[:train_end]
+    val_idx = df.index[train_end:val_end]
+    test_idx = df.index[val_end:]
+    return train_idx, val_idx, test_idx
+
+
+def make_windows_aligned(X_2d: np.ndarray, y_1d: np.ndarray, end_dates: np.ndarray, window: int):
+    X, y, d = [], [], []
+    for t in range(window - 1, len(X_2d)):
+        X.append(X_2d[t - window + 1 : t + 1])
+        y.append(y_1d[t])
+        d.append(end_dates[t])
+    return np.array(X), np.array(y), np.array(d)
+
+
+# ----------------------------
+# 4) MODEL
+# ----------------------------
+def build_model(window: int, n_feat: int, lr: float):
+    inp = tf.keras.Input(shape=(window, n_feat))
+
+    # FIX 1: return_sequences=True for the first LSTM
+    x = tf.keras.layers.LSTM(
+        CFG["LSTM_UNITS_1"],
+        return_sequences=True,
+        kernel_regularizer=tf.keras.regularizers.l2(CFG["L2"]),
+    )(inp)
+    x = tf.keras.layers.Dropout(CFG["DROPOUT"])(x)
+
+    x = tf.keras.layers.LSTM(
+        CFG["LSTM_UNITS_2"],
+        return_sequences=False,
+        kernel_regularizer=tf.keras.regularizers.l2(CFG["L2"]),
+    )(x)
+    x = tf.keras.layers.Dropout(CFG["DROPOUT"])(x)
+
+    x = tf.keras.layers.Dense(16, activation="relu")(x)
+    out = tf.keras.layers.Dense(1, activation="sigmoid")(x)
+
+    model = tf.keras.Model(inp, out)
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
+        loss=tf.keras.losses.BinaryCrossentropy(),
+        metrics=[
+            tf.keras.metrics.AUC(curve="ROC", name="auc_roc"),
+            tf.keras.metrics.AUC(curve="PR", name="auc_pr"),
+            tf.keras.metrics.Precision(name="precision"),
+            tf.keras.metrics.Recall(name="recall"),
+        ],
     )
-
-    safe_run(
-        "FMP: profile & ratios (optional)",
-        lambda: {
-            "profile": fmp_profile("AAPL", fmp_key).head(3),
-            "ratios": fmp_ratios("AAPL", fmp_key, limit=5).head(3),
-        }
-        if fmp_key
-        else "SKIP (no FMP_API_KEY)",
-        default="SKIP/ERROR",
-    )
-
-    safe_run(
-        "EODHD: fundamentals (optional)",
-        lambda: eodhd_fundamentals("AAPL.US", eod_key) if eod_key else "SKIP (no EODHD_API_KEY)",
-        default="SKIP/ERROR",
-    )
-
-    # --- e-disclosure template ---
-    edis = safe_run("e-disclosure.ru: search template (optional)", lambda: edisclosure_search("Сбербанк"), default=pd.DataFrame())
-    show_df(edis, "e-disclosure search", n=10)
-
-    log("\nALL DONE: all blocks attempted; errors (if any) were printed but execution continued.")
+    return model
 
 
-if __name__ == "__main__":
-    main()
+def pick_threshold_on_val(y_true_val, prob_val, future_ret_val, horizon: int, fee: float):
+    rows = []
+    thresholds = np.arange(0.30, 0.71, 0.02)
+
+    def non_overlap_pnl(signal: np.ndarray, future_ret: np.ndarray, horizon: int, fee: float):
+        pnl = []
+        i = 0
+        while i < len(signal):
+            if signal[i] == 1:
+                pnl.append(float(future_ret[i]) - fee)
+                i += horizon
+            else:
+                i += 1
+        if len(pnl) == 0:
+            return 0.0, 0
+        return float(np.mean(pnl)), len(pnl)
+
+    for thr in thresholds:
+        pred = (prob_val >= thr).astype(int)
+
+        f1_1 = f1_score(y_true_val, pred, pos_label=1, zero_division=0)
+        bal = balanced_accuracy_score(y_true_val, pred)
+        mcc = matthews_corrcoef(y_true_val, pred) if len(np.unique(pred)) > 1 else 0.0
+
+        avg_pnl, n_tr = non_overlap_pnl(pred, future_ret_val, horizon, fee)
+
+        MIN_TRADES = 15
+        MIN_BUY_RATE = 0.05
+        MAX_BUY_RATE = 0.35
+        feasible = (n_tr >= MIN_TRADES) and (MIN_BUY_RATE <= pred.mean() <= MAX_BUY_RATE)
+        if not feasible:
+            avg_pnl = -1e9
+
+        rows.append(
+            {
+                "thr": float(thr),
+                "f1_class1": float(f1_1),
+                "balanced_acc": float(bal),
+                "mcc": float(mcc),
+                "share_buy": float(pred.mean()),
+                "avg_trade_ret_nonoverlap": float(avg_pnl),
+                "n_trades_nonoverlap": int(n_tr),
+            }
+        )
+
+    tab = pd.DataFrame(rows).sort_values("thr").reset_index(drop=True)
+    thr_f1 = float(tab.iloc[tab["f1_class1"].values.argmax()]["thr"])
+    thr_pnl = float(tab.iloc[tab["avg_trade_ret_nonoverlap"].values.argmax()]["thr"])
+    return thr_f1, thr_pnl, tab
+
+
+def eval_block(name: str, y_true: np.ndarray, prob: np.ndarray, thr: float):
+    pred = (prob >= thr).astype(int)
+    print("\n" + "=" * 70)
+    print(f"{name} | threshold={thr:.2f}")
+    print("=" * 70)
+
+    print(f"Accuracy: {accuracy_score(y_true, pred):.3f}")
+    print(f"Balanced Accuracy: {balanced_accuracy_score(y_true, pred):.3f}")
+    print(f"F1 macro: {f1_score(y_true, pred, average='macro', zero_division=0):.3f}")
+    print(f"F1 (BUY=1): {f1_score(y_true, pred, pos_label=1, zero_division=0):.3f}")
+    print(f"MCC: {(matthews_corrcoef(y_true, pred) if len(np.unique(pred)) > 1 else 0.0):.3f}")
+
+    if len(np.unique(y_true)) > 1:
+        print(f"ROC-AUC: {roc_auc_score(y_true, prob):.3f}")
+        print(f"PR-AUC: {average_precision_score(y_true, prob):.3f}")
+
+    cm = confusion_matrix(y_true, pred)
+    print("\nConfusion matrix:")
+    print(f"TN={cm[0,0]}, FP={cm[0,1]}")
+    print(f"FN={cm[1,0]}, TP={cm[1,1]}")
+
+    print("\nClassification report:")
+    print(classification_report(y_true, pred, zero_division=0, target_names=["No Growth", "Growth>thr"]))
+
+
+# ----------------------------
+# 5) PIPELINE
+# ----------------------------
+print("Loading market series from MOEX...")
+sber = load_candles_moexalgo(CFG["TICKER"], CFG["START"], CFG["END"])
+usd = load_candles_moexalgo("USD000UTSTOM", CFG["START"], CFG["END"])
+imo = load_candles_moexalgo("IMOEX", CFG["START"], CFG["END"])
+print("SBER:", sber.shape, "USD:", usd.shape, "IMOEX:", imo.shape)
+
+print("\nLoading CBR key rate...")
+key_rate = cbr_key_rate_range(CFG["START"], CFG["END"])
+print("Key rate rows:", len(key_rate))
+
+print("\nLoading MOEX dividends...")
+divs = moex_iss_dividends(CFG["TICKER"])
+print("Div rows:", len(divs))
+
+print("\nBuilding features (Russian sources only)...")
+feat = build_features(sber, usd, imo, key_rate, divs)
+feat = add_target(feat, CFG["HORIZON"], CFG["THR_MOVE"])
+print("Final dataset:", feat.shape)
+print("Class share (BUY=1):", float(feat["Target"].mean().round(3)))
+
+FEATURES = [
+    "ret_1",
+    "ret_2",
+    "ret_5",
+    "rsi_14",
+    "dist_sma20",
+    "dist_sma50",
+    "trend_up_200",
+    "vol_20",
+    "vol_60",
+    "vol_rel",
+    "usd_ret_1",
+    "imoex_ret_1",
+    "key_rate",
+    "key_rate_chg",
+    "rate_rising",
+    "last_dividend",
+    "days_since_last_dividend",
+    "last_div_yield_approx",
+]
+
+FEATURES = [c for c in FEATURES if c in feat.columns]
+print(f"Признаков используется: {len(FEATURES)}")
+print(FEATURES)
+
+train_idx, val_idx, test_idx = time_splits(feat, CFG["TRAIN_FRAC"], CFG["VAL_FRAC"])
+
+scaler = StandardScaler()
+X_all_2d = feat[FEATURES].values
+y_all = feat["Target"].values.astype(int)
+dates_all = feat.index.values
+future_ret_all = feat["future_ret"].values.astype(float)
+
+scaler.fit(feat.loc[train_idx, FEATURES].values)
+X_all_scaled = scaler.transform(X_all_2d)
+
+# Windows aligned
+Xw, yw, dw = make_windows_aligned(X_all_scaled, y_all, dates_all, CFG["WINDOW"])
+future_ret_w = future_ret_all[CFG["WINDOW"] - 1 :]
+
+train_mask = np.isin(dw, train_idx.values)
+val_mask = np.isin(dw, val_idx.values)
+test_mask = np.isin(dw, test_idx.values)
+
+X_train, y_train = Xw[train_mask], yw[train_mask]
+X_val, y_val = Xw[val_mask], yw[val_mask]
+X_test, y_test = Xw[test_mask], yw[test_mask]
+
+fret_val = future_ret_w[val_mask]
+
+print("\nWindows shapes:")
+print("Train:", X_train.shape, "Val:", X_val.shape, "Test:", X_test.shape)
+
+# Class weights (train only)
+classes = np.array([0, 1])
+cw = compute_class_weight("balanced", classes=classes, y=y_train)
+class_weight = {0: float(cw[0]), 1: float(cw[1])}
+print("class_weight:", class_weight)
+
+# Train model
+model = build_model(CFG["WINDOW"], X_train.shape[2], CFG["LR"])
+model.summary()
+
+callbacks = [
+    tf.keras.callbacks.EarlyStopping(
+        monitor="val_auc_pr",
+        mode="max",
+        patience=CFG["PATIENCE"],
+        restore_best_weights=True,
+    ),
+    tf.keras.callbacks.ReduceLROnPlateau(
+        monitor="val_auc_pr",
+        mode="max",
+        factor=0.5,
+        patience=5,
+        min_lr=1e-5,
+    ),
+]
+
+model.fit(
+    X_train,
+    y_train,
+    validation_data=(X_val, y_val),
+    epochs=CFG["EPOCHS"],
+    batch_size=CFG["BATCH"],
+    class_weight=class_weight,
+    shuffle=False,
+    callbacks=callbacks,
+    verbose=1,
+)
+
+# Predict
+prob_val = model.predict(X_val, verbose=0).reshape(-1)
+prob_test = model.predict(X_test, verbose=0).reshape(-1)
+
+# Threshold tuning on VAL
+thr_f1, thr_pnl, thr_table = pick_threshold_on_val(y_val, prob_val, fret_val, CFG["HORIZON"], CFG["FEE"])
+
+print("\nTop thresholds by F1(BUY):")
+print(thr_table.sort_values("f1_class1", ascending=False).head(8).to_string(index=False))
+print("\nTop thresholds by avg non-overlap trade return:")
+print(thr_table.sort_values("avg_trade_ret_nonoverlap", ascending=False).head(8).to_string(index=False))
+
+print(f"\nChosen threshold (VAL max F1(BUY)): {thr_f1:.2f}")
+print(f"Chosen threshold (VAL max avg PnL): {thr_pnl:.2f}")
+
+eval_block("TEST (thr_f1)", y_test, prob_test, thr_f1)
+eval_block("TEST (thr_pnl)", y_test, prob_test, thr_pnl)
+
+# Save artifacts
+model.save("lstm_ru_model_sonnet.keras")
+with open("lstm_ru_scaler_sonnet.pkl", "wb") as f:
+    pickle.dump(scaler, f)
+
+print("\nSaved: lstm_ru_model_sonnet.keras and lstm_ru_scaler_sonnet.pkl")

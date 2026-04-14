@@ -15,6 +15,8 @@ import pandas as pd
 import requests
 import tensorflow as tf
 
+import Ticker
+
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     accuracy_score,

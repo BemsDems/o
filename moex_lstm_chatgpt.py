@@ -255,15 +255,16 @@ def build_features(
     v60 = df["Volume"].rolling(60).mean()
     df["vol_ratio_5_20"] = df["Volume"].rolling(5).mean() / (v20 + 1e-12)
     df["vol_spike"] = (df["Volume"] > (v20 + 2 * df["Volume"].rolling(20).std())).astype(int)
+    # Market / FX context (align to SBER calendar first)
+    usd_close = usd["Close"].reindex(df.index).ffill()
+    imo_close = imo["Close"].reindex(df.index).ffill()
 
-    # Market / FX context
-    usd_ret_1 = usd["Close"].pct_change(1).rename("usd_ret_1")
-    usd_ret_5 = usd["Close"].pct_change(5).rename("usd_ret_5")
-    imo_ret_1 = imo["Close"].pct_change(1).rename("imoex_ret_1")
-    imo_ret_5 = imo["Close"].pct_change(5).rename("imoex_ret_5")
-    imo_ret_20 = imo["Close"].pct_change(20).rename("imoex_ret_20")
+    df["usd_ret_1"] = usd_close.pct_change(1)
+    df["usd_ret_5"] = usd_close.pct_change(5)
 
-    df = df.join(usd_ret_1).join(usd_ret_5).join(imo_ret_1).join(imo_ret_5).join(imo_ret_20)
+    df["imoex_ret_1"] = imo_close.pct_change(1)
+    df["imoex_ret_5"] = imo_close.pct_change(5)
+    df["imoex_ret_20"] = imo_close.pct_change(20)
 
     df["sber_vs_imoex_5"] = df["ret_5"] - df["imoex_ret_5"]
 
@@ -677,7 +678,15 @@ y_all = feat["Target"].values.astype(int)
 dates_all = feat.index.values
 future_ret_all = feat["future_ret"].values.astype(float)
 
-scaler.fit(feat.loc[train_idx, FEATURES].values)
+X_train_raw_2d = feat.loc[train_idx, FEATURES].values
+
+CLIP_Q = 0.005  # 0.5% / 99.5%
+lo = np.nanquantile(X_train_raw_2d, CLIP_Q, axis=0)
+hi = np.nanquantile(X_train_raw_2d, 1 - CLIP_Q, axis=0)
+
+X_all_2d = np.clip(X_all_2d, lo, hi)
+
+scaler.fit(np.clip(X_train_raw_2d, lo, hi))
 X_all_scaled = scaler.transform(X_all_2d)
 
 Xw, yw, dw = make_windows_aligned(X_all_scaled, y_all, dates_all, CFG["WINDOW"])
@@ -735,6 +744,21 @@ model.fit(
 prob_val = model.predict(X_val, verbose=0).reshape(-1)
 prob_test = model.predict(X_test, verbose=0).reshape(-1)
 prob_train = model.predict(X_train, verbose=0).reshape(-1)
+
+# Orientation calibration on the last part of VAL (no TEST leakage)
+N_CAL = min(120, len(y_val))
+auc_tail = roc_auc_score(y_val[-N_CAL:], prob_val[-N_CAL:]) if len(np.unique(y_val[-N_CAL:])) > 1 else 0.5
+auc_tail_inv = roc_auc_score(y_val[-N_CAL:], 1 - prob_val[-N_CAL:]) if len(np.unique(y_val[-N_CAL:])) > 1 else 0.5
+
+FLIP = auc_tail_inv > auc_tail
+print("\n" + "=" * 70)
+print(f"VAL tail AUC={auc_tail:.3f} | AUC(1-p)={auc_tail_inv:.3f} | FLIP={FLIP}")
+print("=" * 70)
+
+if FLIP:
+    prob_train = 1 - prob_train
+    prob_val = 1 - prob_val
+    prob_test = 1 - prob_test
 
 # ---- Probabilities + probability quality ----
 prob_summary("TRAIN", y_train, prob_train)

@@ -478,8 +478,7 @@ def prob_summary(name: str, y_true: np.ndarray, prob: np.ndarray) -> None:
     prob = np.clip(prob, 1e-6, 1 - 1e-6)
 
     pos = float(y_true.mean())
-    print("
-" + "=" * 70)
+    print("\n" + "=" * 70)
     print(f"PROB SUMMARY: {name}")
     print("=" * 70)
     print(f"Samples: {len(y_true)} | Pos rate (BUY=1): {pos:.3f}")
@@ -529,14 +528,12 @@ def threshold_sweep(name: str, y_true: np.ndarray, prob: np.ndarray, thresholds=
         })
 
     tab = pd.DataFrame(rows)
-    print("
-" + "=" * 70)
+    print("\n" + "=" * 70)
     print(f"THRESHOLD SWEEP: {name} (top by F1-macro)")
     print("=" * 70)
     print(tab.sort_values("f1_macro", ascending=False).head(top_k).to_string(index=False))
 
-    print("
-" + "=" * 70)
+    print("\n" + "=" * 70)
     print(f"THRESHOLD SWEEP: {name} (top by MCC)")
     print("=" * 70)
     print(tab.sort_values("mcc", ascending=False).head(top_k).to_string(index=False))
@@ -559,8 +556,7 @@ def decile_report(name: str, y_true: np.ndarray, prob: np.ndarray, future_ret: O
     if future_ret is not None:
         g["avg_future_ret"] = df.groupby("decile")["fret"].mean()
 
-    print("
-" + "=" * 70)
+    print("\n" + "=" * 70)
     print(f"DECILE REPORT: {name}")
     print("=" * 70)
     print(g.reset_index().to_string(index=False))
@@ -599,8 +595,7 @@ def drift_report_features(X_train_2d: np.ndarray, X_test_2d: np.ndarray, feature
         psis.append((str(name), float(p)))
     psis.sort(key=lambda x: x[1], reverse=True)
 
-    print("
-" + "=" * 70)
+    print("\n" + "=" * 70)
     print("FEATURE DRIFT (PSI train→test): top")
     print("=" * 70)
     for n, p in psis[:top_k]:

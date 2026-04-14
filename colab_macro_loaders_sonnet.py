@@ -1,3 +1,5 @@
+
+# sonnet
 # Colab-ready: MOEX/CBR feature engineering + LSTM classifier (Sonnet fixed + full diagnostics)
 # Fixes requested:
 # 1) First LSTM uses return_sequences=True (explicit)

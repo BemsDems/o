@@ -87,16 +87,25 @@ def cbr_key_rate_range(start: str, end: str) -> pd.DataFrame:
         "UniDbQuery.From": pd.to_datetime(start).strftime("%d.%m.%Y"),
         "UniDbQuery.To": pd.to_datetime(end).strftime("%d.%m.%Y"),
     }
+
     html = requests.get(url, params=params, timeout=30).text
-    tables = pd.read_html(html, decimal=",", thousands=" ")
+    tables = pd.read_html(html)
     if not tables:
         return pd.DataFrame(columns=["date", "key_rate"])
 
     df = tables[0].copy()
     df.columns = [str(c).strip() for c in df.columns]
 
-    date_col = next((c for c in df.columns if "дата" in c.lower()), None)
-    rate_col = next((c for c in df.columns if "став" in c.lower()), None)
+    # identify date/rate columns (ru)
+    date_col = None
+    rate_col = None
+    for c in df.columns:
+        lc = c.lower()
+        if date_col is None and "дата" in lc:
+            date_col = c
+        if rate_col is None and ("став" in lc or "ключ" in lc):
+            rate_col = c
+
     if date_col is None or rate_col is None:
         return pd.DataFrame(columns=["date", "key_rate"])
 
@@ -106,7 +115,6 @@ def cbr_key_rate_range(start: str, end: str) -> pd.DataFrame:
         .astype(str)
         .str.replace("%", "", regex=False)
         .str.replace(",", ".", regex=False)
-        .str.replace("\xa0", "", regex=False)
         .str.strip()
     )
     df[rate_col] = pd.to_numeric(df[rate_col], errors="coerce")
@@ -167,221 +175,203 @@ def add_dividend_past_only_features(df: pd.DataFrame, div: pd.DataFrame) -> pd.D
     tmp["date"] = pd.to_datetime(tmp["date"])
 
     tmp["last_dividend"] = 0.0
-    tmp["days_since_last_dividend"] = 9999.0
+    tmp["days_since_last_dividend"] = 9999
     tmp["last_div_yield_approx"] = 0.0
 
     if div is None or div.empty:
-        return tmp.set_index("date")
+        out = tmp.set_index("date")
+        return out
 
-    div2 = div[["date", "dividend_rub"]].dropna().copy()
-    div2["date"] = pd.to_datetime(div2["date"])
-    div2 = div2.sort_values("date").drop_duplicates(subset=["date"])
-    div2["last_div_date"] = div2["date"]
+    div2 = div.copy()
+    div2["date"] = pd.to_datetime(div2["date"], errors="coerce")
+    div2 = div2.dropna().sort_values("date")
 
-    tmp = tmp.sort_values("date")
-    merged = pd.merge_asof(
-        tmp,
-        div2[["date", "dividend_rub", "last_div_date"]],
-        on="date",
-        direction="backward",
-    )
+    # past-only merge: last dividend by date
+    tmp = pd.merge_asof(tmp.sort_values("date"), div2[["date", "dividend_rub"]].sort_values("date"), on="date", direction="backward")
+    tmp["dividend_rub"] = tmp["dividend_rub"].fillna(0.0)
 
-    merged["last_dividend"] = pd.to_numeric(merged["dividend_rub"], errors="coerce").fillna(0.0)
-    merged["days_since_last_dividend"] = (merged["date"] - merged["last_div_date"]).dt.days
-    merged["days_since_last_dividend"] = merged["days_since_last_dividend"].fillna(9999.0)
+    tmp["last_dividend"] = tmp["dividend_rub"]
+    # approximate yield
+    tmp["last_div_yield_approx"] = tmp["last_dividend"] / (tmp["Close"].replace(0, np.nan))
+    tmp["last_div_yield_approx"] = tmp["last_div_yield_approx"].fillna(0.0)
 
-    merged["last_div_yield_approx"] = merged["last_dividend"] / merged["Close"].replace(0, np.nan)
-    merged["last_div_yield_approx"] = merged["last_div_yield_approx"].fillna(0.0)
+    # days since last dividend
+    last_div_date = tmp["date"].where(tmp["dividend_rub"] > 0).ffill()
+    tmp["days_since_last_dividend"] = (tmp["date"] - last_div_date).dt.days.fillna(9999).astype(int)
 
-    merged = merged.drop(columns=["dividend_rub", "last_div_date"], errors="ignore")
-    merged = merged.set_index("date").sort_index()
-    return merged
+    out = tmp.set_index("date")
+    return out
 
 
 def build_features(
-    base: pd.DataFrame,
+    sber: pd.DataFrame,
     usd: pd.DataFrame,
-    imoex: pd.DataFrame,
-    key_rate_df: pd.DataFrame,
-    div_df: pd.DataFrame,
+    imo: pd.DataFrame,
+    key_rate: pd.DataFrame,
+    divs: pd.DataFrame,
 ) -> pd.DataFrame:
-    df = base.copy()
-
-    # join exogenous close series (aligned on trading days)
-    df = df.join(usd[["Close"]].rename(columns={"Close": "USD"}), how="left")
-    df["USD"] = df["USD"].ffill()
-    df = df.join(imoex[["Close"]].rename(columns={"Close": "IMOEX"}), how="left")
-    df["IMOEX"] = df["IMOEX"].ffill()
+    df = sber.copy()
 
     # returns
-    df["ret_1"] = df["Close"].pct_change()
+    df["ret_1"] = df["Close"].pct_change(1)
     df["ret_2"] = df["Close"].pct_change(2)
     df["ret_5"] = df["Close"].pct_change(5)
-
-    df["usd_ret_1"] = df["USD"].pct_change()
-    df["imoex_ret_1"] = df["IMOEX"].pct_change()
-
-    # volatility & volume
-    df["vol_20"] = df["ret_1"].rolling(20).std()
-    df["vol_60"] = df["ret_1"].rolling(60).std()
-    df["vol_rel"] = df["Volume"] / (df["Volume"].rolling(20).mean() + 1e-12)
-
-    # trend features
-    df["sma_20"] = df["Close"].rolling(20).mean()
-    df["sma_50"] = df["Close"].rolling(50).mean()
-    df["sma_200"] = df["Close"].rolling(200).mean()
-
-    df["dist_sma20"] = df["Close"] / df["sma_20"] - 1.0
-    df["dist_sma50"] = df["Close"] / df["sma_50"] - 1.0
-    df["trend_up_200"] = (df["Close"] > df["sma_200"]).astype(int)
-
-    # RSI
-    df["rsi_14"] = rsi(df["Close"], 14)
-
     df["ret_10"] = df["Close"].pct_change(10)
     df["ret_20"] = df["Close"].pct_change(20)
     df["log_ret"] = np.log(df["Close"] / df["Close"].shift(1))
 
-    # extra index/currency context
-    df["usd_ret_5"] = df["USD"].pct_change(5)
-    df["imoex_ret_5"] = df["IMOEX"].pct_change(5)
-    df["imoex_ret_20"] = df["IMOEX"].pct_change(20)
+    # SMA distances
+    sma20 = df["Close"].rolling(20).mean()
+    sma50 = df["Close"].rolling(50).mean()
+    sma200 = df["Close"].rolling(200).mean()
+    df["dist_sma20"] = (df["Close"] - sma20) / (sma20 + 1e-12)
+    df["dist_sma50"] = (df["Close"] - sma50) / (sma50 + 1e-12)
+    df["trend_up_200"] = (df["Close"] > sma200).astype(int)
+
+    # RSI
+    df["rsi_14"] = rsi(df["Close"], 14)
+
+    # Volatility
+    df["vol_20"] = df["ret_1"].rolling(20).std()
+    df["vol_60"] = df["ret_1"].rolling(60).std()
+    df["vol_rel"] = df["vol_20"] / (df["vol_60"] + 1e-12)
+
+    # ATR-like relative range
+    df["hl_range"] = (df["High"] - df["Low"]) / (df["Close"].shift(1) + 1e-12)
+    df["atr_rel"] = df["hl_range"].rolling(14).mean()
+
+    # Bollinger band diagnostics
+    mid = df["Close"].rolling(20).mean()
+    sd = df["Close"].rolling(20).std()
+    upper = mid + 2 * sd
+    lower = mid - 2 * sd
+    df["bb_width"] = (upper - lower) / (mid + 1e-12)
+    df["bb_pos"] = (df["Close"] - lower) / ((upper - lower) + 1e-12)
+
+    # Volume features
+    v20 = df["Volume"].rolling(20).mean()
+    v60 = df["Volume"].rolling(60).mean()
+    df["vol_ratio_5_20"] = df["Volume"].rolling(5).mean() / (v20 + 1e-12)
+    df["vol_spike"] = (df["Volume"] > (v20 + 2 * df["Volume"].rolling(20).std())).astype(int)
+
+    # Market / FX context
+    usd_ret_1 = usd["Close"].pct_change(1).rename("usd_ret_1")
+    usd_ret_5 = usd["Close"].pct_change(5).rename("usd_ret_5")
+    imo_ret_1 = imo["Close"].pct_change(1).rename("imoex_ret_1")
+    imo_ret_5 = imo["Close"].pct_change(5).rename("imoex_ret_5")
+    imo_ret_20 = imo["Close"].pct_change(20).rename("imoex_ret_20")
+
+    df = df.join(usd_ret_1).join(usd_ret_5).join(imo_ret_1).join(imo_ret_5).join(imo_ret_20)
+
     df["sber_vs_imoex_5"] = df["ret_5"] - df["imoex_ret_5"]
 
-    # MACD
-    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["macd"] = ema12 - ema26
-    df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
-    df["macd_hist"] = df["macd"] - df["macd_signal"]
-    df["macd_cross"] = (df["macd"] > df["macd_signal"]).astype(int)
-
-    # Bollinger Bands (20)
-    bb_mid = df["Close"].rolling(20).mean()
-    bb_std = df["Close"].rolling(20).std()
-    bb_up = bb_mid + 2 * bb_std
-    bb_low = bb_mid - 2 * bb_std
-    df["bb_width"] = (bb_up - bb_low) / bb_mid
-    df["bb_pos"] = (df["Close"] - bb_low) / (bb_up - bb_low).replace(0, np.nan)
-
-    # ATR (14)
-    tr = pd.concat(
-        [
-            (df["High"] - df["Low"]),
-            (df["High"] - df["Close"].shift(1)).abs(),
-            (df["Low"] - df["Close"].shift(1)).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    df["atr_14"] = tr.rolling(14).mean()
-    df["atr_rel"] = df["atr_14"] / df["Close"]
-
-    # volume spike / vol ratio
-    df["vol_5"] = df["ret_1"].rolling(5).std()
-    df["vol_ratio_5_20"] = df["vol_5"] / (df["vol_20"] + 1e-12)
-    df["vol_spike"] = (df["vol_rel"] > 2.0).astype(int)
-
-    # add CBR key rate (as-of merge backward)
-    df2 = df.reset_index().rename(columns={df.reset_index().columns[0]: "date"})
-    df2["date"] = pd.to_datetime(df2["date"])
-
-    if key_rate_df is not None and not key_rate_df.empty:
-        kr = key_rate_df[["date", "key_rate"]].copy()
-        kr["date"] = pd.to_datetime(kr["date"])
-        df2 = df2.sort_values("date")
-        kr = kr.sort_values("date")
-        df2 = pd.merge_asof(df2, kr, on="date", direction="backward")
+    # Macro: key rate derivatives only
+    if key_rate is None or key_rate.empty:
+        df["key_rate"] = np.nan
     else:
-        df2["key_rate"] = np.nan
+        kr = key_rate.copy()
+        kr["date"] = pd.to_datetime(kr["date"], errors="coerce")
+        kr = kr.dropna().drop_duplicates(subset=["date"]).sort_values("date")
+        kr = kr.set_index("date").sort_index()
+        kr_daily = kr.reindex(df.index, method="ffill")
+        df["key_rate"] = kr_daily["key_rate"]
 
-    df2 = df2.set_index("date")
-    df2["key_rate"] = df2["key_rate"].ffill()
-    df2["key_rate_chg"] = df2["key_rate"].diff()
-    df2["rate_rising"] = (df2["key_rate_chg"] > 0).astype(int)
+    df["key_rate_chg"] = df["key_rate"].diff()
+    df["rate_rising"] = (df["key_rate_chg"] > 0).astype(int)
 
-    # dividends (past-only)
-    df2 = add_dividend_past_only_features(df2, div_df)
+    # Dividends (optional features; may be excluded from FEATURES)
+    if divs is not None and not divs.empty:
+        df = add_dividend_past_only_features(df, divs)
+    else:
+        df["last_dividend"] = 0.0
+        df["days_since_last_dividend"] = 9999
+        df["last_div_yield_approx"] = 0.0
 
-    # clean
-    df2 = df2.dropna()
-    return df2
+    df = df.dropna().copy()
+    return df
 
 
-# ----------------------------
-# 3) TARGET + SPLITS
-# ----------------------------
-def add_target(df: pd.DataFrame, horizon: int, thr_move: float) -> pd.DataFrame:
+def add_target(df: pd.DataFrame, horizon: int, thr: float) -> pd.DataFrame:
     out = df.copy()
-    out["future_ret"] = out["Close"].shift(-horizon) / out["Close"] - 1.0
-    out["Target"] = (out["future_ret"] > thr_move).astype(int)
-    out = out.dropna()
+    out["future_close"] = out["Close"].shift(-horizon)
+    out["future_ret"] = (out["future_close"] - out["Close"]) / (out["Close"] + 1e-12)
+    out["Target"] = (out["future_ret"] >= thr).astype(int)
+    out = out.dropna().copy()
     return out
 
 
-def time_splits(df: pd.DataFrame, train_frac: float = 0.7, val_frac: float = 0.15):
+def time_splits(df: pd.DataFrame, train_frac: float, val_frac: float):
     n = len(df)
-    train_end = int(n * train_frac)
-    val_end = int(n * (train_frac + val_frac))
-    train_idx = df.index[:train_end]
-    val_idx = df.index[train_end:val_end]
-    test_idx = df.index[val_end:]
+    n_train = int(n * train_frac)
+    n_val = int(n * val_frac)
+
+    train_idx = df.index[:n_train]
+    val_idx = df.index[n_train : n_train + n_val]
+    test_idx = df.index[n_train + n_val :]
     return train_idx, val_idx, test_idx
 
 
-def make_windows_aligned(X_2d: np.ndarray, y_1d: np.ndarray, end_dates: np.ndarray, window: int):
-    """Windows aligned: include day t in window, y corresponds to t."""
-    X, y, d = [], [], []
-    for t in range(window - 1, len(X_2d)):
-        X.append(X_2d[t - window + 1 : t + 1])
-        y.append(y_1d[t])
-        d.append(end_dates[t])
-    return np.array(X), np.array(y), np.array(d)
+def make_windows_aligned(X_2d: np.ndarray, y_1d: np.ndarray, dates_1d: np.ndarray, window: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Make windows and align y/dates to the LAST index of each window."""
+    Xw, yw, dw = [], [], []
+    for i in range(window - 1, len(X_2d)):
+        Xw.append(X_2d[i - window + 1 : i + 1])
+        yw.append(y_1d[i])
+        dw.append(dates_1d[i])
+    return np.asarray(Xw), np.asarray(yw), np.asarray(dw)
 
 
-# ----------------------------
-# 4) MODEL
-# ----------------------------
-def build_lstm_model(window: int, n_features: int, lr: float):
+def build_lstm_model(window: int, n_features: int, lr: float) -> tf.keras.Model:
     inp = tf.keras.Input(shape=(window, n_features))
+
     x = tf.keras.layers.LSTM(64, return_sequences=True)(inp)
-    x = tf.keras.layers.Dropout(0.25)(x)
-    x = tf.keras.layers.LSTM(32, return_sequences=False)(x)
-    x = tf.keras.layers.Dropout(0.25)(x)
-    x = tf.keras.layers.Dense(16, activation="relu")(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
+    x = tf.keras.layers.LSTM(32)(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
+
+    x = tf.keras.layers.Dense(32, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
     out = tf.keras.layers.Dense(1, activation="sigmoid")(x)
 
     model = tf.keras.Model(inp, out)
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
-        loss=tf.keras.losses.BinaryCrossentropy(),
+        loss="binary_crossentropy",
         metrics=[
-            tf.keras.metrics.AUC(curve="ROC", name="auc_roc"),
-            tf.keras.metrics.AUC(curve="PR", name="auc_pr"),
-            tf.keras.metrics.Precision(name="precision"),
-            tf.keras.metrics.Recall(name="recall"),
+            "accuracy",
+            tf.keras.metrics.AUC(name="auc_roc"),
+            tf.keras.metrics.AUC(name="auc_pr", curve="PR"),
         ],
     )
     return model
 
 
-def pick_threshold_on_val(y_true_val, prob_val, future_ret_val, horizon: int, fee: float):
-    """Picks threshold using validation only."""
+def non_overlap_pnl(pred: np.ndarray, future_ret: np.ndarray, horizon: int, fee: float) -> Tuple[float, int]:
+    """Average return per trade, non-overlapping trades (simple)."""
+    i = 0
+    trades = []
+    while i < len(pred):
+        if pred[i] == 1:
+            trades.append(float(future_ret[i] - fee))
+            i += horizon
+        else:
+            i += 1
+    if not trades:
+        return 0.0, 0
+    return float(np.mean(trades)), int(len(trades))
+
+
+def pick_threshold_on_val(
+    y_true_val: np.ndarray,
+    prob_val: np.ndarray,
+    future_ret_val: np.ndarray,
+    horizon: int,
+    fee: float,
+    thresholds=None,
+):
+    if thresholds is None:
+        thresholds = np.arange(0.10, 0.91, 0.02)
+
     rows = []
-    thresholds = np.arange(0.30, 0.71, 0.02)
-
-    def non_overlap_pnl(signal: np.ndarray, future_ret: np.ndarray, horizon: int, fee: float):
-        pnl = []
-        i = 0
-        while i < len(signal):
-            if signal[i] == 1:
-                pnl.append(float(future_ret[i]) - fee)
-                i += horizon
-            else:
-                i += 1
-        if len(pnl) == 0:
-            return 0.0, 0
-        return float(np.mean(pnl)), len(pnl)
-
     for thr in thresholds:
         pred = (prob_val >= thr).astype(int)
 
@@ -448,8 +438,6 @@ def eval_block(name: str, y_true: np.ndarray, prob: np.ndarray, thr: float):
     print("\nBaselines:")
     print(f"Always HOLD (0) accuracy: {accuracy_score(y_true, base0):.3f}")
     print(f"Always BUY  (1) accuracy: {accuracy_score(y_true, base1):.3f}")
-
-
 
 
 # ----------------------------
@@ -639,27 +627,29 @@ def augment_with_smartlab(df: pd.DataFrame, smartlab_df: Optional[pd.DataFrame] 
 
 feat = augment_with_smartlab(feat, smartlab_df=None)
 
+# "Diploma" stable feature set (more robust / lower drift):
+# - removed sparse/regime factors: dividends
+# - removed raw key_rate and usd_ret_1
+# - added broader context (5d/20d) and derived macro only
 FEATURES = [
-    "ret_1",
-    "ret_2",
-    "ret_5",
+    # SBER returns/trend
+    "ret_1", "ret_2", "ret_5", "ret_10", "ret_20", "log_ret",
+    "dist_sma20", "dist_sma50", "trend_up_200",
     "rsi_14",
-    "dist_sma20",
-    "dist_sma50",
-    "trend_up_200",
-    "vol_20",
-    "vol_60",
-    "vol_rel",
-    "usd_ret_1",
-    "imoex_ret_1",
-    "key_rate",
-    "key_rate_chg",
-    "rate_rising",
-    "last_dividend",
-    "days_since_last_dividend",
-    "last_div_yield_approx",
-]
 
+    # Volatility/volume
+    "vol_20", "vol_60", "vol_rel",
+    "atr_rel", "bb_width", "bb_pos",
+    "vol_ratio_5_20", "vol_spike",
+
+    # Market / FX context
+    "imoex_ret_1", "imoex_ret_5", "imoex_ret_20",
+    "usd_ret_5",
+    "sber_vs_imoex_5",
+
+    # Macro: only derivatives
+    "key_rate_chg", "rate_rising",
+]
 FEATURES = [c for c in FEATURES if c in feat.columns]
 print(f"Признаков используется: {len(FEATURES)}")
 print(FEATURES)

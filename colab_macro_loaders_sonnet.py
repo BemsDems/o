@@ -3,8 +3,6 @@
 # LSTM МОДЕЛЬ ДЛЯ ПРОГНОЗИРОВАНИЯ АКЦИЙ СБЕРБАНКА
 # ============================================================
 
-!pip install moexalgo requests tensorflow scikit-learn pandas numpy -q
-
 import numpy as np
 import pandas as pd
 import tensorflow as tf

@@ -140,41 +140,53 @@ def fetch_moex_history(secid: str, start: str, end: Optional[str]) -> pd.DataFra
 
 
 def fetch_moex_dividends(secid: str) -> pd.DataFrame:
-    url = (
-        "https://iss.moex.com/iss/statistics/engines/stock/markets/shares/"
-        f"securities/{secid}/dividends.json"
-    )
-    params = {"iss.meta": "off", "iss.only": "dividends"}
-    j = _get_json(url, params=params, timeout=30)
-    block = j.get("dividends", {})
-    df = pd.DataFrame(block.get("data", []), columns=block.get("columns", []))
+    """Best-effort dividends via MOEX ISS.
+
+    ChatGPT variant uses:
+        https://iss.moex.com/iss/securities/{SECID}/dividends.json
+
+    Returns a normalized frame with columns: date, value
+    (value = dividend in RUB when available).
+    """
+
+    url = f"https://iss.moex.com/iss/securities/{secid}/dividends.json"
+    try:
+        j = _get_json(url, params={"iss.meta": "off"}, timeout=30)
+    except Exception as e:  # noqa: BLE001
+        # If endpoint missing / temporarily unavailable, continue without dividends.
+        print(f"WARNING: dividends fetch failed for {secid}: {e}")
+        return pd.DataFrame(columns=["date", "value"])
+
+    div = j.get("dividends", {}) if isinstance(j, dict) else {}
+    if not div or not div.get("data"):
+        return pd.DataFrame(columns=["date", "value"])
+
+    df = pd.DataFrame(div["data"], columns=div.get("columns", []))
     if df.empty:
-        return df
+        return pd.DataFrame(columns=["date", "value"])
 
-    # columns vary; normalize a couple of useful ones
-    for col in ["registryclosedate", "registryclose", "close_date", "registry_date"]:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
-
+    # Common columns: registryclosedate, value (may vary)
     date_col = None
     for cand in ["registryclosedate", "registryclose", "close_date", "registry_date"]:
         if cand in df.columns:
             date_col = cand
             break
-    if date_col is None:
-        return pd.DataFrame()
 
-    df = df.rename(columns={date_col: "date"})
-    if "value" in df.columns:
-        df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    elif "dividendvalue" in df.columns:
-        df["dividendvalue"] = pd.to_numeric(df["dividendvalue"], errors="coerce")
-        df = df.rename(columns={"dividendvalue": "value"})
-    else:
-        df["value"] = np.nan
+    val_col = None
+    for cand in ["value", "dividendvalue"]:
+        if cand in df.columns:
+            val_col = cand
+            break
 
-    df = df[["date", "value"]].dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
-    return df
+    if date_col is None or val_col is None:
+        return pd.DataFrame(columns=["date", "value"])
+
+    out = pd.DataFrame({
+        "date": pd.to_datetime(df[date_col], errors="coerce"),
+        "value": pd.to_numeric(df[val_col], errors="coerce"),
+    }).dropna().sort_values("date").reset_index(drop=True)
+
+    return out
 
 
 def fetch_cbr_usdrub(start: str, end: Optional[str]) -> pd.Series:

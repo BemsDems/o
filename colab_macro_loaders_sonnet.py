@@ -19,6 +19,32 @@ import requests
 import tensorflow as tf
 
 from sklearn.ensemble import RandomForestClassifier
+
+
+# ----------------------------
+# HTTP helpers
+# ----------------------------
+
+def _get_json(url: str, *, params: dict | None = None, timeout: int = 30) -> dict:
+    """GET url and decode JSON with better error messages.
+
+    Fixes common issue: server returns HTML/text (502/403/etc) and .json() crashes
+    with JSONDecodeError: Expecting value...
+
+    Raises: RuntimeError with status, content-type and a response preview.
+    """
+    r = requests.get(url, params=params, timeout=timeout)
+    ct = (r.headers.get('Content-Type') or '').lower()
+    try:
+        r.raise_for_status()
+    except Exception as e:  # noqa: BLE001
+        preview = (r.text or '')[:300].replace('\n', ' ')
+        raise RuntimeError(f'HTTP error for {url} status={r.status_code} ct={ct} preview={preview!r}') from e
+    try:
+        return r.json()
+    except Exception as e:  # noqa: BLE001
+        preview = (r.text or '')[:300].replace('\n', ' ')
+        raise RuntimeError(f'Non-JSON response for {url} status={r.status_code} ct={ct} preview={preview!r}') from e
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     accuracy_score,
@@ -91,7 +117,7 @@ def fetch_moex_history(secid: str, start: str, end: Optional[str]) -> pd.DataFra
             "history.columns": "TRADEDATE,OPEN,HIGH,LOW,CLOSE,VOLUME,VALUE",
             "start": start_pos,
         }
-        j = requests.get(url, params=params, timeout=30).json()
+        j = _get_json(url, params=params, timeout=30)
         block = j.get("history", {})
         cols = block.get("columns", [])
         data = block.get("data", [])
@@ -119,7 +145,7 @@ def fetch_moex_dividends(secid: str) -> pd.DataFrame:
         f"securities/{secid}/dividends.json"
     )
     params = {"iss.meta": "off", "iss.only": "dividends"}
-    j = requests.get(url, params=params, timeout=30).json()
+    j = _get_json(url, params=params, timeout=30)
     block = j.get("dividends", {})
     df = pd.DataFrame(block.get("data", []), columns=block.get("columns", []))
     if df.empty:

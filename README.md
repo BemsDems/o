@@ -23,3 +23,6 @@ Set optional API keys via env vars: `ALPHAVANTAGE_API_KEY`, `FMP_API_KEY`, `EODH
 
 ## ChatGPT variant
 - `moex_lstm_chatgpt.py` — MOEX/CBR features + LSTM pipeline (heavier deps: `tensorflow`, `scikit-learn`).
+
+## Sonnet LSTM (fixed)
+- `moex_lstm_sonnet.py` — same pipeline, with explicit `return_sequences=True` on the first LSTM and L2 regularization.

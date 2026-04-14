@@ -15,7 +15,7 @@ import pandas as pd
 import requests
 import tensorflow as tf
 
-import Ticker
+from moexalgo import Ticker
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (

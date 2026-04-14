@@ -20,3 +20,6 @@ python colab_macro_loaders_sonnet.py
 ```
 
 Set optional API keys via env vars: `ALPHAVANTAGE_API_KEY`, `FMP_API_KEY`, `EODHD_API_KEY`.
+
+## ChatGPT variant
+- `moex_lstm_chatgpt.py` — MOEX/CBR features + LSTM pipeline (heavier deps: `tensorflow`, `scikit-learn`).

@@ -1,4 +1,4 @@
-"""SONNET TCN v4.0 — LSTM → TCN (Temporal Convolutional Network)
+"""SONNET TCN v4.1 — LSTM → TCN (Temporal Convolutional Network)
 
 Преимущества TCN: causal convolutions, dilation, стабильность, меньше переобучения.
 
@@ -247,7 +247,7 @@ def tcn_residual_block(
     filters: int,
     kernel_size: int,
     dilation_rate: int,
-    dropout: float = 0.3,
+    dropout: float = 0.25,
     l2: float = 1e-4,
 ) -> tf.Tensor:
     """TCN residual block: (causal Conv → LN → Dropout) × 2 + residual."""
@@ -295,7 +295,7 @@ def build_tcn_model(n_features: int, seq_len: int) -> tf.keras.Model:
     x = tf.keras.layers.Dense(
         16, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(1e-4)
     )(x)
-    x = tf.keras.layers.Dropout(0.4)(x)
+    x = tf.keras.layers.Dropout(0.35)(x)
 
     outputs = tf.keras.layers.Dense(1, activation="sigmoid")(x)
 
@@ -331,7 +331,7 @@ def get_tcn_callbacks() -> list[tf.keras.callbacks.Callback]:
             verbose=1,
         ),
         tf.keras.callbacks.ModelCheckpoint(
-            filepath="best_tcn_sonnet_v4.keras",
+            filepath="best_tcn_sonnet_v4_1.keras",
             monitor="val_auc_roc",
             mode="max",
             save_best_only=True,
@@ -390,7 +390,7 @@ def make_sequences_with_dates(
 
 
 def main() -> float:
-    print("SONNET TCN v4.0 - Temporal Convolutional Network")
+    print("SONNET TCN v4.1 - Temporal Convolutional Network")
     print("=" * 60)
 
     secid = str(CFG["TICKER"])
@@ -419,9 +419,9 @@ def main() -> float:
         "price_position",
         "bb_position",
     ]
-    feature_cols = [c for c in feature_cols if c in df_feat.columns]
+    feature_cols = [c for c in feature_cols if c in df_feat.columns and c != "usd_ret_5d"]
 
-    print(f"Features: {len(feature_cols)} = {feature_cols}")
+    print(f"Features (no usd_ret_5d): {len(feature_cols)}", feature_cols)
     print(f"Target balance: {y.mean():.3%} positive")
 
     X = df_feat[feature_cols].fillna(0).values
@@ -485,14 +485,14 @@ def main() -> float:
         verbose=2,
     )
 
-    if os.path.exists("best_tcn_sonnet_v4.keras"):
-        model = tf.keras.models.load_model("best_tcn_sonnet_v4.keras")
+    if os.path.exists("best_tcn_sonnet_v4_1.keras"):
+        model = tf.keras.models.load_model("best_tcn_sonnet_v4_1.keras")
 
     # Threshold tuning on VAL by F1 (AUC does not depend on threshold)
     prob_val = model.predict(X_val, verbose=0).reshape(-1)
     best_thr = 0.5
     best_f1 = -1.0
-    for thr in np.arange(0.30, 0.81, 0.02):
+    for thr in np.arange(0.10, 0.91, 0.02):
         pred_val = (prob_val >= thr).astype(int)
         f1v = f1_score(y_val, pred_val, zero_division=0)
         if f1v > best_f1:
@@ -500,7 +500,7 @@ def main() -> float:
             best_thr = float(thr)
 
     auc_val = roc_auc_score(y_val, prob_val) if len(np.unique(y_val)) > 1 else float("nan")
-    print(f"Best thr (val_f1={best_f1:.4f}, val_auc={auc_val:.4f}): {best_thr:.3f}")
+    print(f"Best threshold (val F1={best_f1:.3f}): {best_thr:.2f}")
 
     # TEST results
     proba = model.predict(X_test, verbose=0).reshape(-1)
@@ -514,7 +514,7 @@ def main() -> float:
     ap = average_precision_score(y_test, proba) if len(np.unique(y_test)) > 1 else float("nan")
 
     print("\n" + "=" * 60)
-    print("SONNET TCN v4.0 RESULTS")
+    print("SONNET TCN v4.1 RESULTS")
     print("=" * 60)
     print(f"Accuracy: {acc:.3%}")
     print(f"Balanced Acc: {bal_acc:.3%}")
@@ -525,14 +525,14 @@ def main() -> float:
     print("\nConfusion:\n", confusion_matrix(y_test, pred))
     print(classification_report(y_test, pred, zero_division=0))
 
-    model.save("tcn_sonnet_v4_final.keras")
-    with open("tcn_sonnet_v4_scaler.pkl", "wb") as f:
+    model.save("tcn_sonnet_v4_1_final.keras")
+    with open("tcn_sonnet_v4_1_scaler.pkl", "wb") as f:
         pickle.dump(scaler, f)
 
-    print("Saved: tcn_sonnet_v4_final.keras + tcn_sonnet_v4_scaler.pkl")
+    print("Saved: tcn_sonnet_v4_1_final.keras + tcn_sonnet_v4_1_scaler.pkl")
     return float(acc)
 
 
 if __name__ == "__main__":
     final_accuracy = main()
-    print(f"FINAL TCN v4.0 ACCURACY: {final_accuracy:.1%}")
+    print(f"FINAL TCN v4.1 ACCURACY: {final_accuracy:.1%}")

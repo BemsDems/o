@@ -340,7 +340,7 @@ def build_tcn_model(window: int, n_features: int, lr: float) -> tf.keras.Model:
 
     # TCN блок с несколькими уровнями расширенной (dilated) свертки
     x = TCN(
-        nb_filters=64,  # число фильтров; можно снизить до 32 для уменьшения переобучения
+        nb_filters=32,  # число фильтров; можно снизить до 32 для уменьшения переобучения
         kernel_size=3,  # размер окна свертки
         nb_stacks=1,  # 1 стек => 1 “слой” TCN
         dilations=(1, 2, 4, 8),  # расширенная (dilated) свертка
@@ -757,7 +757,16 @@ callbacks = [
         patience=5,
         min_lr=1e-5,
     ),
+    tf.keras.callbacks.ModelCheckpoint(
+        filepath="tcn_best.weights.h5",
+        monitor="val_auc_pr",
+        mode="max",
+        save_best_only=True,
+        save_weights_only=True,
+        verbose=1,
+    ),
 ]
+
 
 model.fit(
     X_train,
@@ -770,6 +779,10 @@ model.fit(
     callbacks=callbacks,
     verbose=FIT_VERBOSE,
 )
+
+# Load best weights by VAL PR-AUC (stabilize across restarts)
+if os.path.exists("tcn_best.weights.h5"):
+    model.load_weights("tcn_best.weights.h5")
 
 prob_val = model.predict(X_val, verbose=0).reshape(-1)
 prob_test = model.predict(X_test, verbose=0).reshape(-1)

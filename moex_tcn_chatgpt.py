@@ -66,6 +66,13 @@ CFG = {
     "NON_OVERLAP": True, # skip next HORIZON days after entry
 }
 
+# ----------------------------
+# RUN FLAGS (to reduce output)
+# ----------------------------
+SHOW_MODEL_SUMMARY = False
+SHOW_TRAIN_VAL_DIAG = False
+FIT_VERBOSE = 0
+
 np.random.seed(42)
 tf.random.set_seed(42)
 
@@ -683,7 +690,6 @@ FEATURES = [
 
     # Market / FX context
     "imoex_ret_1", "imoex_ret_5", "imoex_ret_20",
-    "usd_ret_5",
     "sber_vs_imoex_5",
 
     # Macro: only derivatives
@@ -734,7 +740,8 @@ class_weight = {0: float(cw[0]), 1: float(cw[1])}
 print("class_weight:", class_weight)
 
 model = build_tcn_model(CFG["WINDOW"], X_train.shape[2], CFG["LR"])
-model.summary()
+if SHOW_MODEL_SUMMARY:
+    model.summary()
 
 callbacks = [
     tf.keras.callbacks.EarlyStopping(
@@ -761,7 +768,7 @@ model.fit(
     class_weight=class_weight,
     shuffle=False,
     callbacks=callbacks,
-    verbose=1,
+    verbose=FIT_VERBOSE,
 )
 
 prob_val = model.predict(X_val, verbose=0).reshape(-1)
@@ -774,9 +781,10 @@ auc_tail = roc_auc_score(y_val[-N_CAL:], prob_val[-N_CAL:]) if len(np.unique(y_v
 auc_tail_inv = roc_auc_score(y_val[-N_CAL:], 1 - prob_val[-N_CAL:]) if len(np.unique(y_val[-N_CAL:])) > 1 else 0.5
 
 FLIP = auc_tail_inv > auc_tail
-print("\n" + "=" * 70)
-print(f"VAL tail AUC={auc_tail:.3f} | AUC(1-p)={auc_tail_inv:.3f} | FLIP={FLIP}")
-print("=" * 70)
+if SHOW_TRAIN_VAL_DIAG:
+    print("\n" + "=" * 70)
+    print(f"VAL tail AUC={auc_tail:.3f} | AUC(1-p)={auc_tail_inv:.3f} | FLIP={FLIP}")
+    print("=" * 70)
 
 if FLIP:
     prob_train = 1 - prob_train
@@ -784,21 +792,24 @@ if FLIP:
     prob_test = 1 - prob_test
 
 # ---- Probabilities + probability quality ----
-prob_summary("TRAIN", y_train, prob_train)
-prob_summary("VAL", y_val, prob_val)
+if SHOW_TRAIN_VAL_DIAG:
+    prob_summary("TRAIN", y_train, prob_train)
+    prob_summary("VAL", y_val, prob_val)
 prob_summary("TEST", y_test, prob_test)
 
 # ---- Threshold sweeps ----
-sweep_val = threshold_sweep("VAL", y_val, prob_val)
-sweep_test = threshold_sweep("TEST", y_test, prob_test)
+if SHOW_TRAIN_VAL_DIAG:
+    sweep_val = threshold_sweep("VAL", y_val, prob_val)
+    sweep_test = threshold_sweep("TEST", y_test, prob_test)
 
 # ---- Decile analysis (ranking) ----
 fret_train = future_ret_w[train_mask]
 fret_val = future_ret_w[val_mask]
 fret_test = future_ret_w[test_mask]
 
-decile_report("TRAIN", y_train, prob_train, fret_train)
-decile_report("VAL", y_val, prob_val, fret_val)
+if SHOW_TRAIN_VAL_DIAG:
+    decile_report("TRAIN", y_train, prob_train, fret_train)
+    decile_report("VAL", y_val, prob_val, fret_val)
 decile_report("TEST", y_test, prob_test, fret_test)
 
 # ---- Feature drift (PSI) ----
@@ -815,16 +826,9 @@ print("=" * 70)
 
 thr_f1, thr_pnl, thr_table = pick_threshold_on_val(y_val, prob_val, fret_val, CFG["HORIZON"], CFG["FEE"])
 
-print("\nTop thresholds by F1(BUY):")
-print(thr_table.sort_values("f1_class1", ascending=False).head(8).to_string(index=False))
-print("\nTop thresholds by avg non-overlap trade return:")
-print(thr_table.sort_values("avg_trade_ret_nonoverlap", ascending=False).head(8).to_string(index=False))
-
 print(f"\nChosen threshold (VAL max F1(BUY)): {thr_f1:.2f}")
 print(f"Chosen threshold (VAL max avg PnL): {thr_pnl:.2f}")
 
-eval_block("TEST (thr_f1)", y_test, prob_test, thr_f1)
-eval_block("TEST (thr_pnl)", y_test, prob_test, thr_pnl)
 
 
 
@@ -891,7 +895,8 @@ _dates_test = dw[test_mask]
 _close_full = sber["Close"]
 
 backtest_nonoverlap_long_only(prob_test, _dates_test, _close_full, thr_f1, CFG["HORIZON"], CFG["FEE"])
-backtest_nonoverlap_long_only(prob_test, _dates_test, _close_full, thr_pnl, CFG["HORIZON"], CFG["FEE"])
+if abs(thr_pnl - thr_f1) > 1e-12:
+    backtest_nonoverlap_long_only(prob_test, _dates_test, _close_full, thr_pnl, CFG["HORIZON"], CFG["FEE"])
 
 model.save("tcn_ru_model.keras")
 with open("tcn_ru_scaler.pkl", "wb") as f:

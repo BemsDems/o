@@ -42,7 +42,7 @@ from sklearn.utils.class_weight import compute_class_weight
 # CONFIG
 # ----------------------------
 CFG = {
-    "TICKER": "SBER",
+    "TICKER": "GAZP",
     "START": "2015-01-01",
     "END": "2025-12-31",
 

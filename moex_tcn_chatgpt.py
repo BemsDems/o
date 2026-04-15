@@ -684,8 +684,8 @@ FEATURES = [
     "rsi_14",
 
     # Volatility/volume
-    "vol_20", "vol_60", "vol_rel",
-    "atr_rel", "bb_width", "bb_pos",
+    "vol_rel",
+    "bb_width", "bb_pos",
     "vol_ratio_5_20", "vol_spike",
 
     # Market / FX context

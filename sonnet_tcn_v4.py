@@ -417,6 +417,9 @@ def backtest_nonoverlap_long_only(
     close_by_date = close_by_date.copy()
     close_by_date.index = pd.to_datetime(close_by_date.index)
 
+    # Ensure unique index to avoid get_loc returning slice
+    close_by_date = close_by_date[~close_by_date.index.duplicated(keep='last')]
+
     trades = []
     i = 0
     while i < len(prob):
@@ -425,7 +428,11 @@ def backtest_nonoverlap_long_only(
             if d0 not in close_by_date.index:
                 i += 1
                 continue
-            loc0 = close_by_date.index.get_loc(d0)
+            loc0_arr = close_by_date.index.get_indexer([d0])
+            loc0 = int(loc0_arr[0])
+            if loc0 < 0:
+                i += 1
+                continue
             loc1 = loc0 + horizon
             if loc1 >= len(close_by_date.index):
                 break

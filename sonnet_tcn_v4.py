@@ -343,6 +343,135 @@ def get_tcn_callbacks() -> list[tf.keras.callbacks.Callback]:
 # ----------------------------
 # MAIN
 # ----------------------------
+# ----------------------------
+# DIAGNOSTICS: PROBS / DECILES / BACKTEST
+# ----------------------------
+
+def prob_summary_block(y_true: np.ndarray, prob: np.ndarray, name: str = "TEST") -> None:
+    """Краткая сводка по вероятностям."""
+    y_true = np.asarray(y_true).astype(int)
+    prob = np.asarray(prob).astype(float)
+
+    pos_rate = float(y_true.mean()) if len(y_true) else float("nan")
+    print(f"\n=== PROB SUMMARY {name} ===")
+    print(f"Size={len(y_true)}, Pos rate={pos_rate:.3%}")
+
+    print(f"Prob mean={prob.mean():.4f}, std={prob.std():.4f}")
+    qs = [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
+    qv = np.quantile(prob, qs)
+    for q, v in zip(qs, qv):
+        print(f" q{int(q*100):02d}: {v:.4f}")
+
+    if len(np.unique(y_true)) > 1:
+        auc = roc_auc_score(y_true, prob)
+        ap = average_precision_score(y_true, prob)
+        print(f"AUC-ROC={auc:.4f}, PR-AUC={ap:.4f}")
+    else:
+        print("AUC-ROC/PR-AUC: n/a (only one class)")
+
+
+def decile_report(y_true: np.ndarray, prob: np.ndarray, fwd_ret: np.ndarray, name: str = "TEST") -> None:
+    """Децильный отчёт: по децилям prob смотрим средний future_ret."""
+    y_true = np.asarray(y_true).astype(int)
+    prob = np.asarray(prob).astype(float)
+    fwd_ret = np.asarray(fwd_ret).astype(float)
+
+    df = pd.DataFrame({"y": y_true, "p": prob, "ret": fwd_ret}).dropna()
+    if df.empty:
+        print(f"\n=== DECILE REPORT {name} ===")
+        print("No data")
+        return
+
+    df = df.sort_values("p")
+    df["decile"] = pd.qcut(df["p"], 10, labels=False, duplicates="drop")
+
+    print(f"\n=== DECILE REPORT {name} ===")
+    print("decile | count | pos_rate | mean_p | mean_ret")
+    for d in sorted(df["decile"].unique()):
+        sub = df[df["decile"] == d]
+        print(
+            f"{int(d):2d} | "
+            f"{len(sub):5d} | "
+            f"{sub['y'].mean():7.3f} | "
+            f"{sub['p'].mean():7.4f} | "
+            f"{sub['ret'].mean():8.4f}"
+        )
+
+
+def backtest_nonoverlap_long_only(
+    prob: np.ndarray,
+    dates_signal: np.ndarray,
+    close_by_date: pd.Series,
+    thr: float,
+    horizon: int,
+    fee: float = 0.001,
+) -> None:
+    """Backtest: long-only, non-overlap, close-to-close, fee applied as 2*fee.
+
+    close_by_date: pd.Series indexed by trading dates (same calendar as candles), values = close.
+    For each signal date d0 we enter at close[d0] and exit at close[d0+horizon trading days].
+    """
+    prob = np.asarray(prob).astype(float)
+    dates = pd.to_datetime(dates_signal)
+
+    close_by_date = close_by_date.copy()
+    close_by_date.index = pd.to_datetime(close_by_date.index)
+
+    trades = []
+    i = 0
+    while i < len(prob):
+        if prob[i] >= thr:
+            d0 = dates[i]
+            if d0 not in close_by_date.index:
+                i += 1
+                continue
+            loc0 = close_by_date.index.get_loc(d0)
+            loc1 = loc0 + horizon
+            if loc1 >= len(close_by_date.index):
+                break
+
+            entry = float(close_by_date.iloc[loc0])
+            exitp = float(close_by_date.iloc[loc1])
+            gross_ret = exitp / entry - 1.0
+            net_ret = gross_ret - 2.0 * fee
+
+            trades.append(
+                {
+                    "entry_date": close_by_date.index[loc0],
+                    "exit_date": close_by_date.index[loc1],
+                    "gross_ret": gross_ret,
+                    "net_ret": net_ret,
+                }
+            )
+            i += horizon  # non-overlap
+        else:
+            i += 1
+
+    print("\n=== BACKTEST non-overlap LONG ONLY ===")
+    print(f"Threshold={thr:.3f}, horizon={horizon}, fee(one-way)={fee:.4f}")
+
+    if not trades:
+        print("No trades at this threshold.")
+        return
+
+    bt = pd.DataFrame(trades)
+    cum_net = float((1.0 + bt["net_ret"]).prod() - 1.0)
+    winrate = float((bt["net_ret"] > 0).mean())
+    avg_tr = float(bt["net_ret"].mean())
+
+    # Buy&Hold on the same segment (from first entry to last exit)
+    d_start = pd.to_datetime(bt["entry_date"].iloc[0])
+    d_end = pd.to_datetime(bt["exit_date"].iloc[-1])
+    loc_s = close_by_date.index.get_loc(d_start)
+    loc_e = close_by_date.index.get_loc(d_end)
+    bh_ret = float(close_by_date.iloc[loc_e] / close_by_date.iloc[loc_s] - 1.0)
+
+    print(f"trades={len(bt)}")
+    print(f"Total net return: {cum_net:.2%}")
+    print(f"Avg trade net: {avg_tr:.3%}")
+    print(f"Winrate: {winrate:.1%}")
+    print(f"Buy&Hold same period: {bh_ret:.2%}")
+
 @dataclass
 class Dataset:
     df_feat: pd.DataFrame
@@ -524,6 +653,28 @@ def main() -> float:
     print(f"PR-AUC: {ap:.4f}")
     print("\nConfusion:\n", confusion_matrix(y_test, pred))
     print(classification_report(y_test, pred, zero_division=0))
+
+    # --- DIAGNOSTICS ---
+    prob_train = model.predict(X_tr, verbose=0).reshape(-1)
+    prob_val_diag = model.predict(X_val, verbose=0).reshape(-1)
+    prob_test = proba
+
+    prob_summary_block(y_tr, prob_train, name="TRAIN")
+    prob_summary_block(y_val, prob_val_diag, name="VAL")
+    prob_summary_block(y_test, prob_test, name="TEST")
+
+    decile_report(y_test, prob_test, r_test, name="TEST")
+
+    close_by_date = pd.Series(df_feat["CLOSE"].values, index=pd.to_datetime(df_feat["date"]))
+    backtest_nonoverlap_long_only(
+        prob=prob_test,
+        dates_signal=d_test,
+        close_by_date=close_by_date,
+        thr=float(best_thr),
+        horizon=int(CFG["TARGET_HORIZON_DAYS"]),
+        fee=float(CFG["FEE"]),
+    )
+
 
     model.save("tcn_sonnet_v4_1_final.keras")
     with open("tcn_sonnet_v4_1_scaler.pkl", "wb") as f:

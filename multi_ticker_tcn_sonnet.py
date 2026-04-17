@@ -54,13 +54,13 @@ CFG: Dict[str, Any] = {
     "START": "2015-01-01",
     "END": datetime.now().strftime("%Y-%m-%d"),
     "HORIZON": 5,
-    "THR_MOVE": 0.02,
+    "THR_MOVE": 0.03,
     "SEQ_LEN": 30,
     "TRAIN_SPLIT": 0.70,
     "VAL_SPLIT": 0.15,
     "BATCH_SIZE": 64,
     "EPOCHS": 100,
-    "LR": 1e-4,
+    "LR": 3e-4,
     "SEED": 42,
     "FEE": 0.001,
 }
@@ -141,7 +141,7 @@ def build_features_one(df: pd.DataFrame, *, secid: str = "") -> pd.DataFrame:
     # Relative volume
     out["vol_ma_20"] = out["VOLUME"].rolling(20).mean()
     out["vol_rel"] = out["VOLUME"] / (out["vol_ma_20"] + 1e-9)
-    out["vol_rel"] = out["vol_rel"].clip(0.0, 10.0)
+    out["vol_rel"] = out["vol_rel"].clip(0.1, 3.0)
     out["vol_spike"] = (out["vol_rel"] > 2.0).astype(int)
 
     # RSI
@@ -158,7 +158,7 @@ def build_features_one(df: pd.DataFrame, *, secid: str = "") -> pd.DataFrame:
 
     # Volatility proxy
     out["volatility_20"] = out["logret_1"].rolling(20).std()
-    out["volatility_20"] = out["volatility_20"].clip(0.0, 0.5)
+    out["volatility_20"] = out["volatility_20"].clip(0.0, 0.1)
 
     # Diagnostics before drop
     if secid:
@@ -413,37 +413,41 @@ def make_sequences_multi_ticker(
 
 
 def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
-    # Simple dilated causal CNN (TCN-like) without external deps.
     x_in = tf.keras.Input(shape=input_shape)
 
     x = tf.keras.layers.LayerNormalization()(x_in)
-    for dilation in (1, 2, 4, 8):
+
+    # Deeper / wider causal CNN stack
+    for filters, dilation in [(64, 1), (64, 2), (64, 4), (32, 8)]:
         x = tf.keras.layers.Conv1D(
-            filters=32,
+            filters=filters,
             kernel_size=3,
             padding="causal",
             dilation_rate=dilation,
             activation="relu",
+            kernel_initializer="he_normal",
         )(x)
-        x = tf.keras.layers.Dropout(0.2)(x)
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.Dropout(0.3)(x)
 
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
     x = tf.keras.layers.Dense(64, activation="relu")(x)
-    x = tf.keras.layers.Dropout(0.2)(x)
+    x = tf.keras.layers.Dropout(0.4)(x)
+    x = tf.keras.layers.Dense(32, activation="relu")(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
     out = tf.keras.layers.Dense(1, activation="sigmoid")(x)
 
     model = tf.keras.Model(x_in, out)
-    opt = tf.keras.optimizers.Adam(
-        learning_rate=float(CFG["LR"]),
-        clipnorm=1.0,
-        epsilon=1e-7,
-    )
     model.compile(
-        optimizer=opt,
+        optimizer=tf.keras.optimizers.Adam(
+            learning_rate=float(CFG["LR"]),
+            clipnorm=1.0,
+        ),
         loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.0),
         metrics=[tf.keras.metrics.AUC(name="auc")],
     )
     return model
+
 
 
 # ==============================
@@ -648,6 +652,13 @@ def main() -> None:
     if extreme_mask.any():
         print(f"WARNING: {int(extreme_mask.sum())} values with |x| > 10")
         print(f"Max absolute value: {float(np.abs(X_train).max()):.2f}")
+
+    # Clip outliers AFTER scaling (helps prevent collapse to ~0.5 probabilities)
+    X_train = np.clip(X_train, -5.0, 5.0)
+    X_val = np.clip(X_val, -5.0, 5.0)
+    X_test = np.clip(X_test, -5.0, 5.0)
+    print(f"✅ Clipped to [-5, 5]: train max={X_train.max():.2f}")
+
     # Replace NaN/Inf with zeros (keep pipeline running; diagnostics above should highlight sources)
     X_train = np.nan_to_num(X_train, nan=0.0, posinf=0.0, neginf=0.0)
     X_val = np.nan_to_num(X_val, nan=0.0, posinf=0.0, neginf=0.0)

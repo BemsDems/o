@@ -60,7 +60,7 @@ CFG: Dict[str, Any] = {
     "VAL_SPLIT": 0.15,
     "BATCH_SIZE": 64,
     "EPOCHS": 100,
-    "LR": 1e-3,
+    "LR": 1e-4,
     "SEED": 42,
     "FEE": 0.001,
 }
@@ -125,7 +125,10 @@ def build_features_one(df: pd.DataFrame, *, secid: str = "") -> pd.DataFrame:
 
     # Log-returns (lags kept small to reduce NaN loss)
     for lag in (1, 2, 3, 5, 10):
-        out[f"logret_{lag}"] = np.log(out["CLOSE"] / out["CLOSE"].shift(lag))
+        price_ratio = out["CLOSE"] / out["CLOSE"].shift(lag)
+        price_ratio = price_ratio.clip(0.5, 2.0)
+        out[f"logret_{lag}"] = np.log(price_ratio)
+        out[f"logret_{lag}"] = out[f"logret_{lag}"].replace([np.inf, -np.inf], np.nan)
 
     # Trend: short + long
     out["sma_20"] = out["CLOSE"].rolling(20).mean()
@@ -138,10 +141,12 @@ def build_features_one(df: pd.DataFrame, *, secid: str = "") -> pd.DataFrame:
     # Relative volume
     out["vol_ma_20"] = out["VOLUME"].rolling(20).mean()
     out["vol_rel"] = out["VOLUME"] / (out["vol_ma_20"] + 1e-9)
+    out["vol_rel"] = out["vol_rel"].clip(0.0, 10.0)
     out["vol_spike"] = (out["vol_rel"] > 2.0).astype(int)
 
     # RSI
     out["rsi_14"] = compute_rsi(out["CLOSE"], 14)
+    out["rsi_14"] = out["rsi_14"].clip(0.0, 100.0)
     out["rsi_oversold"] = (out["rsi_14"] < 30).astype(int)
     out["rsi_overbought"] = (out["rsi_14"] > 70).astype(int)
 
@@ -149,9 +154,11 @@ def build_features_one(df: pd.DataFrame, *, secid: str = "") -> pd.DataFrame:
     high_20 = out["HIGH"].rolling(20).max()
     low_20 = out["LOW"].rolling(20).min()
     out["price_pos_20"] = (out["CLOSE"] - low_20) / ((high_20 - low_20) + 1e-9)
+    out["price_pos_20"] = out["price_pos_20"].clip(0.0, 1.0)
 
     # Volatility proxy
     out["volatility_20"] = out["logret_1"].rolling(20).std()
+    out["volatility_20"] = out["volatility_20"].clip(0.0, 0.5)
 
     # Diagnostics before drop
     if secid:
@@ -397,7 +404,7 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
     # Simple dilated causal CNN (TCN-like) without external deps.
     x_in = tf.keras.Input(shape=input_shape)
 
-    x = x_in
+    x = tf.keras.layers.LayerNormalization()(x_in)
     for dilation in (1, 2, 4, 8):
         x = tf.keras.layers.Conv1D(
             filters=32,
@@ -414,7 +421,11 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
     out = tf.keras.layers.Dense(1, activation="sigmoid")(x)
 
     model = tf.keras.Model(x_in, out)
-    opt = tf.keras.optimizers.Adam(learning_rate=float(CFG["LR"]))
+    opt = tf.keras.optimizers.Adam(
+        learning_rate=float(CFG["LR"]),
+        clipnorm=1.0,
+        epsilon=1e-7,
+    )
     model.compile(
         optimizer=opt,
         loss="binary_crossentropy",
@@ -594,6 +605,24 @@ def main() -> None:
     X_val = tr(X_val)
     X_test = tr(X_test)
 
+    # ------------------------------
+    # DATA SANITY CHECK (to prevent NaN loss from epoch 1)
+    # ------------------------------
+    print("\n=== DATA SANITY CHECK ===")
+    print(f"Train X: min={np.nanmin(X_train):.4f}, max={np.nanmax(X_train):.4f}")
+    print(f"Train X has NaN: {np.isnan(X_train).any()}")
+    print(f"Train X has Inf: {np.isinf(X_train).any()}")
+    print(f"Train y: unique={np.unique(y_train)}, distribution={np.bincount(y_train.astype(int))}")
+
+    extreme_mask = np.abs(X_train) > 10
+    if extreme_mask.any():
+        print(f"WARNING: {int(extreme_mask.sum())} values with |x| > 10")
+        print(f"Max absolute value: {float(np.abs(X_train).max()):.2f}")
+
+    if np.isnan(X_train).any() or np.isinf(X_train).any():
+        raise RuntimeError("NaN/Inf found in X_train after scaling. Check feature engineering / clipping.")
+
+
     # Class weights
     classes = np.array([0, 1])
     w = compute_class_weight(class_weight="balanced", classes=classes, y=y_train)
@@ -603,7 +632,18 @@ def main() -> None:
     model = build_tcn_model((n_steps, n_feat))
     model.summary()
 
+    class NanCheck(tf.keras.callbacks.Callback):
+        def on_batch_end(self, batch, logs=None):
+            if logs is None:
+                return
+            loss = logs.get("loss")
+            if loss is not None and (np.isnan(loss) or np.isinf(loss)):
+                print(f"\nNaN/Inf loss detected at batch={batch}, stopping training")
+                self.model.stop_training = True
+
+
     cb = [
+        NanCheck(),
         tf.keras.callbacks.EarlyStopping(monitor="val_auc", patience=15, mode="max", restore_best_weights=True),
         tf.keras.callbacks.ReduceLROnPlateau(monitor="val_auc", factor=0.5, patience=7, mode="max", min_lr=1e-5),
     ]

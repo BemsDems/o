@@ -747,7 +747,7 @@ def build_features(
     df["imoex_ret_5"] = imo_close.pct_change(5)
     df["imoex_ret_20"] = imo_close.pct_change(20)
 
-    df["sber_vs_imoex_5"] = df["ret_5"] - df["imoex_ret_5"]
+    df["stock_vs_imoex_5"] = df["ret_5"] - df["imoex_ret_5"]
 
     # Macro: key rate derivatives only
     if key_rate is None or key_rate.empty:
@@ -1260,6 +1260,11 @@ def drift_report_features(X_train_2d: np.ndarray, X_test_2d: np.ndarray, feature
 
 def alpha_nonoverlap(prob: np.ndarray, dates_signal: np.ndarray, close_full: pd.Series, thr: float, horizon: int, fee: float) -> float:
     """Compute alpha (strategy - buy&hold) for non-overlap long-only rule."""
+    out = alpha_nonoverlap_stats(prob, dates_signal, close_full, thr, horizon, fee)
+    return float(out["alpha"])
+
+
+def alpha_nonoverlap_stats(prob, dates_signal, close_full, thr, horizon, fee):
     dates = pd.to_datetime(dates_signal)
     close_full2 = close_full.copy()
     close_full2.index = pd.to_datetime(close_full2.index)
@@ -1277,6 +1282,7 @@ def alpha_nonoverlap(prob: np.ndarray, dates_signal: np.ndarray, close_full: pd.
 
     eq = 1.0
     i = 0
+    n_trades = 0
     while i < len(prob):
         if prob[i] >= thr:
             d0 = dates[i]
@@ -1293,13 +1299,16 @@ def alpha_nonoverlap(prob: np.ndarray, dates_signal: np.ndarray, close_full: pd.
             entry = float(close_full2.iloc[int(loc0)])
             exitp = float(close_full2.iloc[int(loc1)])
             ret = exitp / entry - 1.0 - float(fee)
+
             eq *= (1.0 + ret)
+            n_trades += 1
             i += int(horizon)
         else:
             i += 1
 
     strat_ret = float(eq - 1.0)
-    return float(strat_ret - bh_ret)
+    alpha = float(strat_ret - bh_ret)
+    return {"alpha": alpha, "n_trades": int(n_trades)}
 
 
 def prepare_dataset_once() -> Dict[str, Any]:
@@ -1339,7 +1348,7 @@ def prepare_dataset_once() -> Dict[str, Any]:
         "ret_1", "ret_2", "ret_5", "ret_10", "ret_20", "log_ret",
         "dist_sma20", "dist_sma50", "trend_up_200", "rsi_14",
         "vol_rel", "bb_width", "bb_pos", "vol_ratio_5_20", "vol_spike",
-        "imoex_ret_1", "imoex_ret_5", "imoex_ret_20", "sber_vs_imoex_5",
+        "imoex_ret_1", "imoex_ret_5", "imoex_ret_20", "stock_vs_imoex_5",
         "key_rate_chg", "rate_rising",
     ]
     FEATURES = [c for c in base_features if c in feat.columns]
@@ -1593,7 +1602,16 @@ def run_once(run_seed: int, prepared: Dict[str, Any]) -> Dict[str, Any]:
     )
     print("=" * 70)
 
-    alpha_thr_pnl = alpha_nonoverlap(prob_test, _dates_test, _close_full, float(thr_pnl), int(CFG["HORIZON"]), float(CFG["FEE"]))
+    alpha_stats = alpha_nonoverlap_stats(
+        prob_test,
+        _dates_test,
+        _close_full,
+        float(thr_pnl),
+        int(CFG["HORIZON"]),
+        float(CFG["FEE"]),
+    )
+    alpha_thr_pnl = float(alpha_stats["alpha"])
+    n_trades_thr_pnl = int(alpha_stats["n_trades"])
 
     if bool(CFG.get("SAVE_SINGLE_RUN_ARTIFACTS", False)) and len(CFG.get("RUN_SEEDS", [])) <= 1:
         model.save("tcn_ru_model.keras")
@@ -1608,6 +1626,7 @@ def run_once(run_seed: int, prepared: Dict[str, Any]) -> Dict[str, Any]:
         "logloss_gain_vs_baseline": float(test_metrics["logloss_gain_vs_baseline"]),
         "prob_psi": float(p_psi),
         "alpha_thr_pnl": float(alpha_thr_pnl),
+        "n_trades_thr_pnl": int(n_trades_thr_pnl),
         "best_epoch": int(hist_info["best_epoch"]),
         "thr_f1": float(thr_f1),
         "thr_pnl": float(thr_pnl),
@@ -1627,7 +1646,8 @@ if __name__ == "__main__":
             f"pr_auc={res['pr_auc']:.3f} "
             f"ll_gain={res['logloss_gain_vs_baseline']:+.4f} "
             f"psi={res['prob_psi']:.3f} "
-            f"alpha@thr_pnl={res['alpha_thr_pnl']:+.2%}"
+            f"alpha@thr_pnl={res['alpha_thr_pnl']:+.2%} "
+            f"trades={res['n_trades_thr_pnl']}"
         )
 
     df = pd.DataFrame(results)
@@ -1638,7 +1658,14 @@ if __name__ == "__main__":
         print("\nDescribe:")
         print(df.describe(include="all").to_string())
 
-    num_cols = ["roc_auc", "pr_auc", "logloss_gain_vs_baseline", "prob_psi", "alpha_thr_pnl"]
+    num_cols = [
+        "roc_auc",
+        "pr_auc",
+        "logloss_gain_vs_baseline",
+        "prob_psi",
+        "alpha_thr_pnl",
+        "n_trades_thr_pnl",
+    ]
     summary = pd.DataFrame({
         "metric": num_cols,
         "mean": [df[c].mean() for c in num_cols],

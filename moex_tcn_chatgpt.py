@@ -204,6 +204,7 @@ def add_dividend_past_only_features(df: pd.DataFrame, div: pd.DataFrame) -> pd.D
     tmp = out.reset_index().rename(columns={out.index.name or out.reset_index().columns[0]: "date"})
     tmp["date"] = pd.to_datetime(tmp["date"])
 
+    # defaults
     tmp["last_dividend"] = 0.0
     tmp["days_since_last_dividend"] = 9999
     tmp["last_div_yield_approx"] = 0.0
@@ -218,6 +219,7 @@ def add_dividend_past_only_features(df: pd.DataFrame, div: pd.DataFrame) -> pd.D
     div2["date"] = pd.to_datetime(div2["date"], errors="coerce")
     div2 = div2.dropna().sort_values("date").reset_index(drop=True)
 
+    # last known dividend
     tmp = pd.merge_asof(
         tmp.sort_values("date"),
         div2[["date", "dividend_rub"]].sort_values("date"),
@@ -228,29 +230,34 @@ def add_dividend_past_only_features(df: pd.DataFrame, div: pd.DataFrame) -> pd.D
 
     tmp["last_dividend"] = tmp["dividend_rub"]
 
+    # approx yield
     tmp["last_div_yield_approx"] = tmp["last_dividend"] / tmp["Close"].replace(0, np.nan)
     tmp["last_div_yield_approx"] = tmp["last_div_yield_approx"].fillna(0.0)
 
+    # days since last dividend
     last_div_date = tmp["date"].where(tmp["dividend_rub"] > 0).ffill()
     tmp["days_since_last_dividend"] = (tmp["date"] - last_div_date).dt.days.fillna(9999).astype(int)
 
     tmp["div_paid_recent_30d"] = (tmp["days_since_last_dividend"] <= 30).astype(int)
 
+    # growth of last dividend vs previous one
     if len(div2) >= 2:
         div2["prev_dividend"] = div2["dividend_rub"].shift(1)
-        div2["div_growth_last"] = div2["dividend_rub"] / div2["prev_dividend"].replace(0, np.nan) - 1.0
-        div2["div_growth_last"] = div2["div_growth_last"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        div2["div_growth_last_tmp"] = div2["dividend_rub"] / div2["prev_dividend"].replace(0, np.nan) - 1.0
+        div2["div_growth_last_tmp"] = div2["div_growth_last_tmp"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
         tmp = pd.merge_asof(
             tmp.sort_values("date"),
-            div2[["date", "div_growth_last"]].sort_values("date"),
+            div2[["date", "div_growth_last_tmp"]].sort_values("date"),
             on="date",
             direction="backward",
         )
-        tmp["div_growth_last"] = tmp["div_growth_last"].fillna(0.0)
+        tmp["div_growth_last"] = tmp["div_growth_last_tmp"].fillna(0.0)
+        tmp = tmp.drop(columns=["div_growth_last_tmp"], errors="ignore")
     else:
         tmp["div_growth_last"] = 0.0
 
+    # trailing 365d dividends
     div_events = div2.set_index("date")["dividend_rub"].sort_index()
     daily_div = div_events.reindex(tmp["date"]).fillna(0.0)
     tmp["div_sum_365d"] = daily_div.rolling(365, min_periods=1).sum().values

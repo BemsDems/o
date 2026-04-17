@@ -60,7 +60,7 @@ CFG: Dict[str, Any] = {
     "VAL_SPLIT": 0.15,
     "BATCH_SIZE": 64,
     "EPOCHS": 100,
-    "LR": 3e-4,
+    "LR": 1e-4,
     "SEED": 42,
     "FEE": 0.001,
 }
@@ -417,7 +417,7 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
 
     x = tf.keras.layers.LayerNormalization()(x_in)
 
-    # Deeper / wider causal CNN stack
+    # TCN blocks with L2 regularization
     for filters, dilation in [(64, 1), (64, 2), (64, 4), (32, 8)]:
         x = tf.keras.layers.Conv1D(
             filters=filters,
@@ -426,15 +426,24 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
             dilation_rate=dilation,
             activation="relu",
             kernel_initializer="he_normal",
+            kernel_regularizer=tf.keras.regularizers.l2(1e-3),
         )(x)
         x = tf.keras.layers.BatchNormalization()(x)
-        x = tf.keras.layers.Dropout(0.3)(x)
+        x = tf.keras.layers.Dropout(0.4)(x)
 
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
-    x = tf.keras.layers.Dense(64, activation="relu")(x)
+    x = tf.keras.layers.Dense(
+        64,
+        activation="relu",
+        kernel_regularizer=tf.keras.regularizers.l2(1e-3),
+    )(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
+    x = tf.keras.layers.Dense(
+        32,
+        activation="relu",
+        kernel_regularizer=tf.keras.regularizers.l2(1e-3),
+    )(x)
     x = tf.keras.layers.Dropout(0.4)(x)
-    x = tf.keras.layers.Dense(32, activation="relu")(x)
-    x = tf.keras.layers.Dropout(0.3)(x)
     out = tf.keras.layers.Dense(1, activation="sigmoid")(x)
 
     model = tf.keras.Model(x_in, out)
@@ -443,7 +452,7 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
             learning_rate=float(CFG["LR"]),
             clipnorm=1.0,
         ),
-        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.0),
+        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.1),
         metrics=[tf.keras.metrics.AUC(name="auc")],
     )
     return model
@@ -665,6 +674,12 @@ def main() -> None:
     X_test = np.nan_to_num(X_test, nan=0.0, posinf=0.0, neginf=0.0)
     print("✅ NaN/Inf replaced with 0 after scaling")
 
+    # Data augmentation (small Gaussian noise) for train only
+    noise_std = 0.05
+    X_train_aug = X_train + np.random.normal(0.0, noise_std, X_train.shape)
+    X_train_aug = np.clip(X_train_aug, -5.0, 5.0)
+
+
 
     # Class weights
     classes = np.array([0, 1])
@@ -687,12 +702,12 @@ def main() -> None:
 
     cb = [
         NanCheck(),
-        tf.keras.callbacks.EarlyStopping(monitor="val_auc", patience=15, mode="max", restore_best_weights=True),
+        tf.keras.callbacks.EarlyStopping(monitor="val_auc", patience=20, mode="max", restore_best_weights=True),
         tf.keras.callbacks.ReduceLROnPlateau(monitor="val_auc", factor=0.5, patience=7, mode="max", min_lr=1e-5),
     ]
 
     model.fit(
-        X_train,
+        X_train_aug,
         y_train,
         validation_data=(X_val, y_val),
         epochs=int(CFG["EPOCHS"]),

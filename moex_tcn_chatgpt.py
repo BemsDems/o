@@ -584,6 +584,142 @@ def prob_summary(name: str, y_true: np.ndarray, prob: np.ndarray) -> None:
     print(f"Baseline LogLoss (const p=pos_rate): {base_ll:.3f}")
 
 
+def history_summary(history) -> dict:
+    h = pd.DataFrame(getattr(history, "history", {}) or {})
+    out = {
+        "epochs_run": int(len(h)),
+        "best_epoch": np.nan,
+        "best_val_auc_pr": np.nan,
+        "best_val_auc_roc": np.nan,
+        "best_val_loss": np.nan,
+    }
+    if h.empty:
+        return out
+
+    if "val_auc_pr" in h.columns:
+        out["best_epoch"] = int(h["val_auc_pr"].idxmax()) + 1
+        out["best_val_auc_pr"] = float(h["val_auc_pr"].max())
+    elif "val_loss" in h.columns:
+        out["best_epoch"] = int(h["val_loss"].idxmin()) + 1
+
+    if "val_auc_roc" in h.columns:
+        out["best_val_auc_roc"] = float(h["val_auc_roc"].max())
+    if "val_loss" in h.columns:
+        out["best_val_loss"] = float(h["val_loss"].min())
+
+    return out
+
+
+def compact_prob_metrics(y_true: np.ndarray, prob: np.ndarray) -> dict:
+    y_true = y_true.astype(int)
+    prob = np.clip(prob.astype(float), 1e-6, 1 - 1e-6)
+
+    pos_rate = float(y_true.mean())
+    out = {
+        "pos_rate": pos_rate,
+        "prob_mean": float(prob.mean()),
+        "prob_std": float(prob.std()),
+        "logloss": float(log_loss(y_true, prob)),
+        "brier": float(brier_score_loss(y_true, prob)),
+        "ece10": float(ece_score(y_true, prob, n_bins=10)),
+    }
+
+    base_prob = np.full_like(prob, fill_value=pos_rate, dtype=float)
+    out["baseline_logloss"] = float(log_loss(y_true, np.clip(base_prob, 1e-6, 1 - 1e-6)))
+    out["logloss_gain_vs_baseline"] = float(out["baseline_logloss"] - out["logloss"])
+
+    if len(np.unique(y_true)) > 1:
+        out["roc_auc"] = float(roc_auc_score(y_true, prob))
+        out["roc_auc_inv"] = float(roc_auc_score(y_true, 1 - prob))
+        out["pr_auc"] = float(average_precision_score(y_true, prob))
+        out["pr_auc_lift"] = float(out["pr_auc"] - pos_rate)
+    else:
+        out["roc_auc"] = float("nan")
+        out["roc_auc_inv"] = float("nan")
+        out["pr_auc"] = float("nan")
+        out["pr_auc_lift"] = float("nan")
+
+    return out
+
+
+def make_decile_table(
+    y_true: np.ndarray,
+    prob: np.ndarray,
+    future_ret: np.ndarray | None = None,
+    n_bins: int = 10,
+) -> pd.DataFrame:
+    df = pd.DataFrame({"y": y_true.astype(int), "p": prob.astype(float)})
+    if future_ret is not None:
+        df["fret"] = future_ret.astype(float)
+
+    df["decile"] = pd.qcut(df["p"], q=n_bins, labels=False, duplicates="drop")
+    g = df.groupby("decile").agg(
+        n=("y", "size"),
+        p_mean=("p", "mean"),
+        buy_rate=("y", "mean"),
+    )
+    if future_ret is not None:
+        g["avg_future_ret"] = df.groupby("decile")["fret"].mean()
+
+    return g.reset_index()
+
+
+def backtest_nonoverlap_long_only_stats(prob, dates_signal, close_full, thr, horizon, fee) -> dict:
+    dates = pd.to_datetime(dates_signal)
+    close_full = close_full.copy()
+    close_full.index = pd.to_datetime(close_full.index)
+
+    start_date = dates[0]
+    last_date = dates[-1]
+    try:
+        last_loc = close_full.index.get_loc(last_date)
+        end_loc = min(last_loc + horizon, len(close_full.index) - 1)
+        end_date = close_full.index[end_loc]
+    except KeyError:
+        end_date = close_full.index[-1]
+
+    bh_ret = float(close_full.loc[end_date] / close_full.loc[start_date] - 1.0)
+
+    eq = 1.0
+    trades = []
+    i = 0
+    while i < len(prob):
+        if prob[i] >= thr:
+            d0 = dates[i]
+            try:
+                loc0 = close_full.index.get_loc(d0)
+            except KeyError:
+                i += 1
+                continue
+
+            loc1 = loc0 + horizon
+            if loc1 >= len(close_full.index):
+                break
+
+            entry = float(close_full.iloc[loc0])
+            exitp = float(close_full.iloc[loc1])
+            ret = exitp / entry - 1.0 - fee
+
+            eq *= (1.0 + ret)
+            trades.append(ret)
+            i += horizon
+        else:
+            i += 1
+
+    strat = float(eq - 1.0)
+    alpha = float(strat - bh_ret)
+
+    return {
+        "strategy_return": strat,
+        "buyhold_return": bh_ret,
+        "alpha": alpha,
+        "n_trades": int(len(trades)),
+        "winrate": float((sum(1 for x in trades if x > 0) / len(trades)) if trades else 0.0),
+        "avg_trade_ret": float((sum(trades) / len(trades)) if trades else 0.0),
+        "median_trade_ret": float(np.median(trades) if trades else 0.0),
+    }
+
+
 def threshold_sweep(name: str, y_true: np.ndarray, prob: np.ndarray, thresholds=None, top_k: int = 10) -> pd.DataFrame:
     if thresholds is None:
         thresholds = np.arange(0.10, 0.91, 0.02)
@@ -913,6 +1049,67 @@ thr_f1, thr_pnl, thr_table = pick_threshold_on_val(y_val, prob_val, fret_val, CF
 
 print(f"\nChosen threshold (VAL max F1(BUY)): {thr_f1:.2f}")
 print(f"Chosen threshold (VAL max avg PnL): {thr_pnl:.2f}")
+
+# ----------------------------
+# COMPACT DASHBOARD (single block)
+# ----------------------------
+_hist = history_summary(history)
+_test = compact_prob_metrics(y_test, prob_test)
+_dec = make_decile_table(y_test, prob_test, future_ret=fret_test, n_bins=10)
+
+# decile spread: top vs bottom buy-rate
+if len(_dec) >= 2:
+    _dec_spread = float(_dec.loc[_dec["decile"].max(), "buy_rate"] - _dec.loc[_dec["decile"].min(), "buy_rate"])
+else:
+    _dec_spread = float("nan")
+
+# Prepare backtest inputs (re-used below)
+_dates_test = dw[test_mask]
+_close_full = sber["Close"]
+
+_bt_f1 = backtest_nonoverlap_long_only_stats(prob_test, _dates_test, _close_full, thr_f1, CFG["HORIZON"], CFG["FEE"])
+_bt_pnl = backtest_nonoverlap_long_only_stats(prob_test, _dates_test, _close_full, thr_pnl, CFG["HORIZON"], CFG["FEE"])
+
+print("\n" + "=" * 70)
+print("=== COMPACT DASHBOARD ===")
+print("=" * 70)
+print(
+    "HISTORY | "
+    f"epochs_run={_hist['epochs_run']} "
+    f"best_epoch={_hist['best_epoch']} "
+    f"best_val_auc_pr={_hist['best_val_auc_pr']:.4f} "
+    f"best_val_auc_roc={_hist['best_val_auc_roc']:.4f} "
+    f"best_val_loss={_hist['best_val_loss']:.4f}"
+)
+
+print(
+    "TEST | "
+    f"roc_auc={_test['roc_auc']:.4f} pr_auc={_test['pr_auc']:.4f} pr_lift={_test['pr_auc_lift']:.4f} | "
+    f"logloss={_test['logloss']:.4f} (gain_vs_base={_test['logloss_gain_vs_baseline']:+.4f}) | "
+    f"ece10={_test['ece10']:.4f} | prob_mean={_test['prob_mean']:.4f}±{_test['prob_std']:.4f} | "
+    f"prob_psi(train→test)={p_psi:.3f}"
+)
+
+inv = bool(_test["roc_auc_inv"] > _test["roc_auc"])
+print(f"inverted_signal={inv} (roc_auc(1-p)={_test['roc_auc_inv']:.4f})")
+print(f"decile_spread(buy_rate top-bottom)={_dec_spread:+.4f}")
+print("deciles (TEST):")
+print(_dec.to_string(index=False))
+
+print("\nBACKTEST TEST (non-overlap, Close):")
+print(
+    f"thr_f1={thr_f1:.2f} | strat={_bt_f1['strategy_return']:+.2%} "
+    f"bh={_bt_f1['buyhold_return']:+.2%} alpha={_bt_f1['alpha']:+.2%} "
+    f"trades={_bt_f1['n_trades']} win={_bt_f1['winrate']:.1%}"
+)
+print(
+    f"thr_pnl={thr_pnl:.2f} | strat={_bt_pnl['strategy_return']:+.2%} "
+    f"bh={_bt_pnl['buyhold_return']:+.2%} alpha={_bt_pnl['alpha']:+.2%} "
+    f"trades={_bt_pnl['n_trades']} win={_bt_pnl['winrate']:.1%}"
+)
+print("=" * 70)
+
+
 
 
 

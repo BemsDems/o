@@ -38,6 +38,8 @@ from moexalgo import Ticker
 from sklearn.metrics import (
     average_precision_score,
     balanced_accuracy_score,
+    classification_report,
+    confusion_matrix,
     f1_score,
     matthews_corrcoef,
     roc_auc_score,
@@ -63,6 +65,9 @@ CFG: Dict[str, Any] = {
     "LR": 1e-4,
     "SEED": 42,
     "FEE": 0.001,
+
+    # Extended (diploma) diagnostics — can be slow (plots/permutation).
+    "EXTENDED_DIAGNOSTICS": False,
 }
 
 np.random.seed(int(CFG["SEED"]))
@@ -587,6 +592,214 @@ def simple_backtest_nonoverlap_longonly(
     return pd.DataFrame(res_rows).sort_values("secid")
 
 
+# ==============================
+# EXTENDED DIAGNOSTICS (for diploma)
+# ==============================
+
+
+def plot_probability_distribution(y_true: np.ndarray, y_prob: np.ndarray, name: str = ""):
+    """Histogram of probabilities for each class (best-effort; skips if matplotlib missing)."""
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        print(f"[plot_probability_distribution] matplotlib not available: {e}")
+        return
+
+    y_true = y_true.astype(int)
+    y_prob = y_prob.astype(float)
+
+    prob_class0 = y_prob[y_true == 0]
+    prob_class1 = y_prob[y_true == 1]
+
+    print(f"\n=== PROBABILITY DISTRIBUTION {name} ===")
+    if len(prob_class0):
+        print(f"Class 0 (no growth): mean={prob_class0.mean():.3f}, std={prob_class0.std():.3f}")
+    if len(prob_class1):
+        print(f"Class 1 (growth):    mean={prob_class1.mean():.3f}, std={prob_class1.std():.3f}")
+    if len(prob_class0) and len(prob_class1):
+        print(f"Separation (mean diff): {abs(prob_class1.mean() - prob_class0.mean()):.3f}")
+
+    plt.figure(figsize=(10, 5))
+    plt.hist(prob_class0, bins=50, alpha=0.6, label="No Growth (y=0)", color="red")
+    plt.hist(prob_class1, bins=50, alpha=0.6, label="Growth (y=1)", color="green")
+    plt.xlabel("Predicted Probability")
+    plt.ylabel("Frequency")
+    plt.title(f"Probability Distribution {name}")
+    plt.axvline(0.5, color="black", linestyle="--")
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.show()
+
+
+def calibration_curve_analysis(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10):
+    """Calibration curve report (text)."""
+    from sklearn.calibration import calibration_curve
+
+    y_true = y_true.astype(int)
+    y_prob = np.clip(y_prob.astype(float), 1e-6, 1 - 1e-6)
+
+    prob_true, prob_pred = calibration_curve(y_true, y_prob, n_bins=n_bins, strategy="uniform")
+
+    print("\n=== CALIBRATION ANALYSIS ===")
+    print("Predicted Prob | True Frequency | Difference")
+    print("-" * 50)
+    for pred, true in zip(prob_pred, prob_true):
+        diff = abs(true - pred)
+        status = "✓" if diff < 0.1 else "✗"
+        print(f"{pred:14.3f} | {true:14.3f} | {diff:10.3f} {status}")
+
+    ece = float(np.mean(np.abs(prob_true - prob_pred))) if len(prob_true) else float("nan")
+    print(f"\nExpected Calibration Error (ECE): {ece:.4f}")
+
+
+def analyze_predictions_by_confidence(y_true: np.ndarray, y_prob: np.ndarray, fwd_ret: np.ndarray):
+    """Quality by confidence deciles."""
+    y_true = y_true.astype(int)
+    y_prob = y_prob.astype(float)
+    fwd_ret = fwd_ret.astype(float)
+
+    print("\n=== PREDICTIONS BY CONFIDENCE LEVEL ===")
+    deciles = np.percentile(y_prob, np.arange(0, 101, 10))
+
+    print("Decile | Prob Range | N | Accuracy | Avg Future Ret | Precision")
+    print("-" * 80)
+
+    for i in range(len(deciles) - 1):
+        lo, hi = deciles[i], deciles[i + 1]
+        mask = (y_prob >= lo) & (y_prob < hi) if i < len(deciles) - 2 else (y_prob >= lo) & (y_prob <= hi)
+        if mask.sum() == 0:
+            continue
+
+        n = int(mask.sum())
+        y_t = y_true[mask]
+        y_p = y_prob[mask]
+        ret = fwd_ret[mask]
+
+        accuracy = float((y_t == (y_p >= 0.5)).mean())
+        avg_ret = float(ret.mean())
+        precision = float(y_t.mean())
+
+        print(f"D{i+1:2d} | {lo:.3f} - {hi:.3f} | {n:4d} | {accuracy:8.3f} | {avg_ret:14.4f} | {precision:9.3f}")
+
+    top_10pct = y_prob >= np.percentile(y_prob, 90)
+    bot_10pct = y_prob <= np.percentile(y_prob, 10)
+
+    print("\n=== TOP 10% MOST CONFIDENT ===")
+    print(f"N: {int(top_10pct.sum())}")
+    print(f"Avg prob: {float(y_prob[top_10pct].mean()):.3f}")
+    print(f"Precision: {float(y_true[top_10pct].mean()):.3f}")
+    print(f"Avg future return: {float(fwd_ret[top_10pct].mean()):.4f}")
+
+    print("\n=== BOTTOM 10% LEAST CONFIDENT ===")
+    print(f"N: {int(bot_10pct.sum())}")
+    print(f"Avg prob: {float(y_prob[bot_10pct].mean()):.3f}")
+    print(f"Precision: {float(y_true[bot_10pct].mean()):.3f}")
+    print(f"Avg future return: {float(fwd_ret[bot_10pct].mean()):.4f}")
+
+
+def confusion_matrix_analysis(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.5):
+    """Detailed confusion matrix."""
+    y_true = y_true.astype(int)
+    y_pred = (y_prob >= threshold).astype(int)
+    cm = confusion_matrix(y_true, y_pred)
+
+    print(f"\n=== CONFUSION MATRIX (threshold={threshold:.2f}) ===")
+    print(" Predicted")
+    print(" NO   YES")
+    print(f"Actual NO {cm[0,0]:5d} {cm[0,1]:5d}")
+    print(f"Actual YES {cm[1,0]:5d} {cm[1,1]:5d}")
+
+    tn, fp, fn, tp = cm.ravel()
+    print("\n=== CLASSIFICATION REPORT ===")
+    print(classification_report(y_true, y_pred, target_names=["No Growth", "Growth"], digits=3, zero_division=0))
+
+    if (tp + fp) > 0:
+        prec = tp / (tp + fp)
+    else:
+        prec = float('nan')
+    if (tp + fn) > 0:
+        rec = tp / (tp + fn)
+    else:
+        rec = float('nan')
+    print(f"Precision: {prec:.3f} | Recall: {rec:.3f}")
+
+
+def feature_importance_proxy(model, X_test: np.ndarray, y_test: np.ndarray, feature_names: list, max_features: int = 20):
+    """Permutation importance proxy via AUC drop. Can be slow."""
+    print("\n=== FEATURE IMPORTANCE (Permutation, AUC drop) ===")
+    y_test = y_test.astype(int)
+
+    base_pred = model.predict(X_test, verbose=0).ravel()
+    if len(np.unique(y_test)) < 2:
+        print("AUC undefined (single class in y_test)")
+        return []
+    base_auc = float(roc_auc_score(y_test, base_pred))
+
+    n_feat = X_test.shape[2]
+    max_features = min(max_features, n_feat)
+
+    importances = []
+    for i in range(max_features):
+        fname = feature_names[i] if i < len(feature_names) else f"f{i}"
+        X_perm = X_test.copy()
+        for t in range(X_perm.shape[1]):
+            np.random.shuffle(X_perm[:, t, i])
+        perm_pred = model.predict(X_perm, verbose=0).ravel()
+        perm_auc = float(roc_auc_score(y_test, perm_pred))
+        importances.append((fname, base_auc - perm_auc))
+
+    importances.sort(key=lambda x: x[1], reverse=True)
+    print(f"Base AUC: {base_auc:.4f}")
+    print("Feature | Importance")
+    print("-" * 40)
+    for fname, imp in importances:
+        print(f"{fname:20s} | {imp:10.4f}")
+    return importances
+
+
+def temporal_performance_analysis(y_true: np.ndarray, y_prob: np.ndarray, dates: np.ndarray):
+    """Monthly AUC / stats."""
+    df = pd.DataFrame({
+        "date": pd.to_datetime(dates),
+        "y_true": y_true.astype(int),
+        "y_prob": y_prob.astype(float),
+    })
+    df["month"] = df["date"].dt.to_period("M")
+
+    print("\n=== TEMPORAL PERFORMANCE (Monthly) ===")
+    print("Month | N | Pos Rate | Avg Prob | AUC")
+    print("-" * 60)
+
+    for month, g in df.groupby("month"):
+        if len(g) < 10:
+            continue
+        pos_rate = float(g["y_true"].mean())
+        avg_prob = float(g["y_prob"].mean())
+        if len(np.unique(g["y_true"].values)) > 1:
+            auc = float(roc_auc_score(g["y_true"].values, g["y_prob"].values))
+        else:
+            auc = float('nan')
+        print(f"{str(month):10s} | {len(g):4d} | {pos_rate:8.3f} | {avg_prob:8.3f} | {auc:.3f}")
+
+
+def check_random_baseline(y_true: np.ndarray, n_iterations: int = 100):
+    """Compare to random predictor AUC distribution."""
+    y_true = y_true.astype(int)
+    if len(np.unique(y_true)) < 2:
+        print("Random baseline AUC undefined (single class)")
+        return
+
+    aucs = []
+    for _ in range(int(n_iterations)):
+        rp = np.random.uniform(0.0, 1.0, len(y_true))
+        aucs.append(float(roc_auc_score(y_true, rp)))
+    mu = float(np.mean(aucs))
+    sd = float(np.std(aucs))
+    print("\n=== RANDOM BASELINE COMPARISON ===")
+    print(f"Random model AUC: {mu:.4f} ± {sd:.4f}")
+    print(f"2-sigma threshold: {mu + 2*sd:.4f}")
+
+
 def main() -> None:
     ds, feature_cols = build_multi_ticker_dataset()
 
@@ -719,6 +932,25 @@ def main() -> None:
     )
 
     y_prob = model.predict(X_test, batch_size=int(CFG["BATCH_SIZE"])).ravel()
+
+    # ==============================
+    # EXTENDED DIAGNOSTICS
+    # ==============================
+    if bool(CFG.get("EXTENDED_DIAGNOSTICS", False)):
+        print("\n" + "=" * 80)
+        print("EXTENDED MODEL DIAGNOSTICS")
+        print("=" * 80)
+
+        plot_probability_distribution(y_test, y_prob, name="TEST")
+        calibration_curve_analysis(y_test, y_prob, n_bins=10)
+        analyze_predictions_by_confidence(y_test, y_prob, fwd_test)
+        confusion_matrix_analysis(y_test, y_prob, threshold=0.5)
+        feature_importance_proxy(model, X_test, y_test, feature_cols, max_features=min(20, len(feature_cols)))
+        temporal_performance_analysis(y_test, y_prob, dates_test)
+        check_random_baseline(y_test, n_iterations=100)
+
+        print("\n" + "=" * 80)
+
 
     # Prediction sanity check
     if np.isnan(y_prob).any():

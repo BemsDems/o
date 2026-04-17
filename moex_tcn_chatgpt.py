@@ -877,7 +877,6 @@ FEATURES = [
     "vol_rel", "bb_width", "bb_pos", "vol_ratio_5_20", "vol_spike",
     "imoex_ret_1", "imoex_ret_5", "imoex_ret_20", "sber_vs_imoex_5",
     "key_rate_chg", "rate_rising",
-    "div_paid_recent_30d",
 ]
 FEATURES = [c for c in FEATURES if c in feat.columns]
 print(f"Признаков используется: {len(FEATURES)}")

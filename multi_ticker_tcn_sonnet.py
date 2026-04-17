@@ -55,7 +55,12 @@ from sklearn.utils.class_weight import compute_class_weight
 # CONFIG
 # ==============================
 CFG: Dict[str, Any] = {
-    "TICKERS": ["SBER", "GAZP", "LKOH", "YNDX"],
+    "TICKERS": [
+        "SBER", "GAZP", "LKOH", "YNDX",
+        "GMKN", "NVTK", "ROSN", "TATN",
+        "MTSS", "MGNT", "ALRS", "PLZL",
+        "CHMF", "NLMK", "VTBR",
+    ],
     "START": "2015-01-01",
     "END": datetime.now().strftime("%Y-%m-%d"),
     "HORIZON": 5,
@@ -63,7 +68,7 @@ CFG: Dict[str, Any] = {
     "SEQ_LEN": 30,
     "TRAIN_SPLIT": 0.70,
     "VAL_SPLIT": 0.15,
-    "BATCH_SIZE": 64,
+    "BATCH_SIZE": 128,
     "EPOCHS": 100,
     "LR": 3e-4,
     "SEED": 42,
@@ -422,11 +427,9 @@ def make_sequences_multi_ticker(
 
 def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
     x_in = tf.keras.Input(shape=input_shape)
-
     x = tf.keras.layers.LayerNormalization()(x_in)
 
-    # TCN blocks with MODERATE regularization
-    for filters, dilation in [(64, 1), (64, 2), (64, 4), (32, 8)]:
+    for filters, dilation in [(32, 1), (32, 2), (32, 4)]:
         x = tf.keras.layers.Conv1D(
             filters=filters,
             kernel_size=3,
@@ -434,24 +437,13 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
             dilation_rate=dilation,
             activation="relu",
             kernel_initializer="he_normal",
-            kernel_regularizer=tf.keras.regularizers.l2(1e-5),
         )(x)
         x = tf.keras.layers.BatchNormalization()(x)
-        x = tf.keras.layers.Dropout(0.4)(x)
+        x = tf.keras.layers.Dropout(0.3)(x)
 
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
-    x = tf.keras.layers.Dense(
-        64,
-        activation="relu",
-        kernel_regularizer=tf.keras.regularizers.l2(1e-5),
-    )(x)
-    x = tf.keras.layers.Dropout(0.5)(x)
-    x = tf.keras.layers.Dense(
-        32,
-        activation="relu",
-        kernel_regularizer=tf.keras.regularizers.l2(1e-5),
-    )(x)
-    x = tf.keras.layers.Dropout(0.4)(x)
+    x = tf.keras.layers.Dense(32, activation="relu")(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
     out = tf.keras.layers.Dense(1, activation="sigmoid")(x)
 
     model = tf.keras.Model(x_in, out)
@@ -460,7 +452,7 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
             learning_rate=float(CFG["LR"]),
             clipnorm=1.0,
         ),
-        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.05),
+        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.0),
         metrics=[tf.keras.metrics.AUC(name="auc")],
     )
     return model
@@ -957,8 +949,21 @@ def main() -> None:
 
     cb = [
         NanCheck(),
-        tf.keras.callbacks.EarlyStopping(monitor="val_auc", patience=10, mode="max", restore_best_weights=True),
-        tf.keras.callbacks.ReduceLROnPlateau(monitor="val_auc", factor=0.5, patience=5, mode="max", min_lr=1e-6),
+        tf.keras.callbacks.EarlyStopping(
+            monitor="val_auc",
+            patience=20,
+            mode="max",
+            restore_best_weights=True,
+            min_delta=0.001,
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_auc",
+            factor=0.5,
+            patience=8,
+            mode="max",
+            min_lr=1e-6,
+            min_delta=0.001,
+        ),
     ]
 
     model.fit(

@@ -277,16 +277,36 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
 
 
 def time_split_masks(dates: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    # Split by unique sorted dates globally
+    """Time split by global date axis.
+
+    Guardrails:
+    - If dates is empty (e.g., no sequences built), raise a clear error instead
+      of crashing with IndexError.
+    - Ensure train/val/test are non-empty enough to proceed.
+    """
+    if dates is None or len(dates) == 0:
+        raise RuntimeError(
+            "No sequences were created (empty dates array). "
+            "Likely reasons: too little data after feature dropna/horizon trim, "
+            "too large SEQ_LEN, or tickers have sparse history for the chosen START/END. "
+            "Try: reduce SEQ_LEN, move START forward, or verify tickers."
+        )
+
     uniq = np.unique(dates)
     uniq = np.sort(uniq)
-    n = len(uniq)
+    n = int(len(uniq))
+    if n == 0:
+        raise RuntimeError("Empty unique date axis after sequence build.")
 
-    n_train = int(n * float(CFG["TRAIN_SPLIT"]))
-    n_val = int(n * float(CFG["VAL_SPLIT"]))
+    # Ensure at least 1 date in each split where possible
+    n_train = max(1, int(n * float(CFG["TRAIN_SPLIT"])))
+    n_val = max(1, int(n * float(CFG["VAL_SPLIT"])))
+    if n_train + n_val >= n:
+        # leave at least one date for test
+        n_val = max(1, n - n_train - 1)
 
-    train_end = uniq[n_train - 1] if n_train > 0 else uniq[0]
-    val_end = uniq[n_train + n_val - 1] if (n_train + n_val) > 0 else uniq[-1]
+    train_end = uniq[n_train - 1]
+    val_end = uniq[min(n_train + n_val - 1, n - 1)]
 
     m_train = dates <= train_end
     m_val = (dates > train_end) & (dates <= val_end)
@@ -394,6 +414,15 @@ def main() -> None:
     )
 
     print(f"Sequences: Xs={Xs.shape}, ys={ys.shape}")
+
+    if Xs.size == 0:
+        raise RuntimeError(
+            "No training sequences produced. "
+            "This usually means after feature engineering (dropna) and horizon trim "
+            "there are fewer than SEQ_LEN+1 rows per ticker. "
+            "Try: reduce SEQ_LEN, move START forward (e.g., 2018-01-01), "
+            "or remove illiquid/short-history tickers."
+        )
 
     # Split
     m_train, m_val, m_test = time_split_masks(ds_dates)

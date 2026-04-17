@@ -28,7 +28,7 @@ FIX (2026‑04):
 
 import os
 from dataclasses import dataclass
-from datetime import date
+from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -52,7 +52,7 @@ from sklearn.utils.class_weight import compute_class_weight
 CFG: Dict[str, Any] = {
     "TICKERS": ["SBER", "GAZP", "LKOH", "YNDX"],
     "START": "2015-01-01",
-    "END": None,
+    "END": datetime.now().strftime("%Y-%m-%d"),
     "HORIZON": 5,
     "THR_MOVE": 0.02,
     "SEQ_LEN": 30,
@@ -76,7 +76,7 @@ tf.random.set_seed(int(CFG["SEED"]))
 def _resolve_end_date(end: str | None) -> str:
     """moexalgo не принимает None для конца диапазона."""
     if end is None:
-        return date.today().isoformat()
+        return datetime.now().strftime("%Y-%m-%d")
     return str(end)
 
 

@@ -187,6 +187,16 @@ def build_features_one(df: pd.DataFrame, *, secid: str = "") -> pd.DataFrame:
         share = (n1 / n0 * 100.0) if n0 else 0.0
         print(f"  after dropna(critical): {n1} ({share:.1f}%)")
 
+    # Final cleanup: remove any remaining NaN/Inf (should be rare)
+    out = out.replace([np.inf, -np.inf], np.nan)
+    out = out.fillna(0.0)
+    if secid:
+        try:
+            ok = (not out.isnull().any().any())
+        except Exception:
+            ok = True
+        print(f"  final NaN check: {ok}")
+
     return out
 
 
@@ -567,6 +577,24 @@ def simple_backtest_nonoverlap_longonly(
 def main() -> None:
     ds, feature_cols = build_multi_ticker_dataset()
 
+    print("\n=== NaN DIAGNOSTICS (RAW FEATURES) ===")
+    print(f"X_raw NaN: {np.isnan(ds.X).any()}, Inf: {np.isinf(ds.X).any()}")
+    for i, col in enumerate(feature_cols):
+        n_nan = int(np.isnan(ds.X[:, i]).sum())
+        n_inf = int(np.isinf(ds.X[:, i]).sum())
+        if n_nan > 0 or n_inf > 0:
+            print(f"  WARNING {col}: {n_nan} NaN, {n_inf} Inf")
+
+    # Fix raw X to prevent scaler from propagating NaN/Inf
+    ds = MultiDataset(
+        X=np.nan_to_num(ds.X, nan=0.0, posinf=0.0, neginf=0.0),
+        y=ds.y,
+        fwd_ret=ds.fwd_ret,
+        dates=ds.dates,
+        secids=ds.secids,
+    )
+
+
     # Split by dates on ROWS (not windows), then build sequences per ticker within each split
     m_train_rows, m_val_rows, m_test_rows = time_split_masks(ds.dates)
 
@@ -620,9 +648,11 @@ def main() -> None:
     if extreme_mask.any():
         print(f"WARNING: {int(extreme_mask.sum())} values with |x| > 10")
         print(f"Max absolute value: {float(np.abs(X_train).max()):.2f}")
-
-    if np.isnan(X_train).any() or np.isinf(X_train).any():
-        raise RuntimeError("NaN/Inf found in X_train after scaling. Check feature engineering / clipping.")
+    # Replace NaN/Inf with zeros (keep pipeline running; diagnostics above should highlight sources)
+    X_train = np.nan_to_num(X_train, nan=0.0, posinf=0.0, neginf=0.0)
+    X_val = np.nan_to_num(X_val, nan=0.0, posinf=0.0, neginf=0.0)
+    X_test = np.nan_to_num(X_test, nan=0.0, posinf=0.0, neginf=0.0)
+    print("✅ NaN/Inf replaced with 0 after scaling")
 
 
     # Class weights

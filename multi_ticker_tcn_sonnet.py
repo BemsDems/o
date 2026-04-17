@@ -67,7 +67,7 @@ CFG: Dict[str, Any] = {
     "FEE": 0.001,
 
     # Extended (diploma) diagnostics — can be slow (plots/permutation).
-    "EXTENDED_DIAGNOSTICS": False,
+    "EXTENDED_DIAGNOSTICS": True,
 }
 
 np.random.seed(int(CFG["SEED"]))
@@ -933,30 +933,30 @@ def main() -> None:
 
     y_prob = model.predict(X_test, batch_size=int(CFG["BATCH_SIZE"])).ravel()
 
-    # ==============================
-    # EXTENDED DIAGNOSTICS
-    # ==============================
-    if bool(CFG.get("EXTENDED_DIAGNOSTICS", False)):
-        print("\n" + "=" * 80)
-        print("EXTENDED MODEL DIAGNOSTICS")
-        print("=" * 80)
-
-        plot_probability_distribution(y_test, y_prob, name="TEST")
-        calibration_curve_analysis(y_test, y_prob, n_bins=10)
-        analyze_predictions_by_confidence(y_test, y_prob, fwd_test)
-        confusion_matrix_analysis(y_test, y_prob, threshold=0.5)
-        feature_importance_proxy(model, X_test, y_test, feature_cols, max_features=min(20, len(feature_cols)))
-        temporal_performance_analysis(y_test, y_prob, dates_test)
-        check_random_baseline(y_test, n_iterations=100)
-
-        print("\n" + "=" * 80)
-
-
     # Prediction sanity check
     if np.isnan(y_prob).any():
         print("\nWARNING: NaN in predictions — model likely failed to train")
         print(f"Train X NaN: {np.isnan(X_train).any()}, Inf: {np.isinf(X_train).any()}")
         return
+
+
+    print("\n" + "="*80)
+    print("EXTENDED MODEL DIAGNOSTICS")
+    print("="*80)
+
+    plot_probability_distribution(y_test, y_prob, name="TEST")
+    calibration_curve_analysis(y_test, y_prob, n_bins=10)
+    analyze_predictions_by_confidence(y_test, y_prob, fwd_test)
+    confusion_matrix_analysis(y_test, y_prob, threshold=0.5)
+    importances = feature_importance_proxy(model, X_test, y_test, feature_cols)
+    temporal_performance_analysis(y_test, y_prob, dates_test)
+    check_random_baseline(y_test, n_iterations=100)
+
+    print("\n" + "="*80)
+
+
+
+
 
 
     print("\n=== GLOBAL TEST METRICS ===")

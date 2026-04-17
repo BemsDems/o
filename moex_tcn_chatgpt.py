@@ -866,30 +866,21 @@ feat = augment_with_smartlab(feat, smartlab_df=None)
 # - removed raw key_rate and usd_ret_1
 # - added broader context (5d/20d) and derived macro only
 FEATURES = [
-    # price/trend
     "ret_1", "ret_2", "ret_5", "ret_10", "ret_20", "log_ret",
     "dist_sma20", "dist_sma50", "trend_up_200",
     "rsi_14",
 
-    # vol / bands / volume
     "vol_rel",
     "bb_width", "bb_pos",
     "vol_ratio_5_20", "vol_spike",
 
-    # market context
     "imoex_ret_1", "imoex_ret_5", "imoex_ret_20",
     "sber_vs_imoex_5",
 
-    # macro
     "key_rate_chg", "rate_rising",
 
-    # dividends
-    "last_dividend",
-    "days_since_last_dividend",
-    "last_div_yield_approx",
+    # dividends (soft / safest)
     "div_paid_recent_30d",
-    "div_growth_last",
-    "div_sum_365d",
 ]
 FEATURES = [c for c in FEATURES if c in feat.columns]
 print(f"Признаков используется: {len(FEATURES)}")

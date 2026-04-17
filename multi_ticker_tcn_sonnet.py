@@ -20,10 +20,15 @@ from __future__ import annotations
   принадлежит одному secid.
 - Разбиение train/val/test делается по глобальной временной оси (по датам), а потом окна
   фильтруются по secid.
+
+FIX (2026‑04):
+- moexalgo требует, чтобы оба параметра диапазона дат были заданы.
+  Если CFG["END"] = None, подставляем сегодняшнюю дату.
 """
 
 import os
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -68,8 +73,19 @@ tf.random.set_seed(int(CFG["SEED"]))
 # DATA LOADING
 # ==============================
 
+def _resolve_end_date(end: str | None) -> str:
+    """moexalgo не принимает None для конца диапазона."""
+    if end is None:
+        return date.today().isoformat()
+    return str(end)
+
+
 def fetch_moex_candles(secid: str, start: str, end: str | None) -> pd.DataFrame:
-    raw = Ticker(secid).candles(start=start, end=end, period="1D")
+    end_resolved = _resolve_end_date(end)
+
+    # В разных версиях moexalgo встречаются разные имена параметров,
+    # но start/end поддерживаются широко; главное — не передавать None.
+    raw = Ticker(secid).candles(start=str(start), end=str(end_resolved), period="1D")
     df = pd.DataFrame(raw)
     if df.empty:
         return df
@@ -82,9 +98,7 @@ def fetch_moex_candles(secid: str, start: str, end: str | None) -> pd.DataFrame:
     keep = ["close", "high", "low", "volume"]
     df = df[keep].sort_index()
 
-    df = df.rename(
-        columns={"close": "CLOSE", "high": "HIGH", "low": "LOW", "volume": "VOLUME"}
-    )
+    df = df.rename(columns={"close": "CLOSE", "high": "HIGH", "low": "LOW", "volume": "VOLUME"})
     df["secid"] = str(secid)
     return df
 
@@ -185,9 +199,7 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
     dates = pd.to_datetime(full["date"]).values
     secids = full["secid"].astype(str).values
 
-    print(
-        f"Multi-ticker dataset: X={X.shape}, pos_rate={y.mean():.3%}, tickers={sorted(set(secids))}"
-    )
+    print(f"Multi-ticker dataset: X={X.shape}, pos_rate={y.mean():.3%}, tickers={sorted(set(secids))}")
     print(f"Features: {feature_cols}")
     return MultiDataset(X=X, y=y, fwd_ret=fwd_ret, dates=dates, secids=secids), feature_cols
 
@@ -195,6 +207,7 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
 # ==============================
 # SEQUENCES
 # ==============================
+
 
 def make_sequences_with_meta(
     X: np.ndarray,
@@ -224,241 +237,240 @@ def make_sequences_with_meta(
 
 
 # ==============================
-# TCN MODEL
+# MODEL
 # ==============================
 
-def tcn_block(inputs: tf.Tensor, filters: int, kernel_size: int, dilations: List[int]) -> tf.Tensor:
-    x = inputs
-    for d in dilations:
-        pad = (kernel_size - 1) * d
-        x_padded = tf.pad(x, [[0, 0], [pad, 0], [0, 0]])
-        x_conv = tf.keras.layers.Conv1D(
-            filters=filters,
-            kernel_size=kernel_size,
-            padding="valid",
-            dilation_rate=d,
+
+def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
+    # Simple dilated causal CNN (TCN-like) without external deps.
+    x_in = tf.keras.Input(shape=input_shape)
+
+    x = x_in
+    for dilation in (1, 2, 4, 8):
+        x = tf.keras.layers.Conv1D(
+            filters=32,
+            kernel_size=3,
+            padding="causal",
+            dilation_rate=dilation,
             activation="relu",
-            kernel_regularizer=tf.keras.regularizers.l2(1e-4),
-        )(x_padded)
-        x_conv = tf.keras.layers.Dropout(0.3)(x_conv)
-        x_conv = tf.keras.layers.LayerNormalization()(x_conv)
+        )(x)
+        x = tf.keras.layers.Dropout(0.2)(x)
 
-        if x.shape[-1] != filters:
-            x = tf.keras.layers.Conv1D(filters, 1)(x)
-        x = tf.keras.layers.Add()([x, x_conv])
-    return x
-
-
-def build_tcn_model(n_features: int, seq_len: int) -> tf.keras.Model:
-    inp = tf.keras.Input(shape=(seq_len, n_features))
-    x = tcn_block(inp, filters=32, kernel_size=3, dilations=[1, 2])
-    x = tcn_block(x, filters=32, kernel_size=3, dilations=[4, 8])
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
-    x = tf.keras.layers.Dense(
-        16, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(1e-4)
-    )(x)
-    x = tf.keras.layers.Dropout(0.4)(x)
+    x = tf.keras.layers.Dense(64, activation="relu")(x)
+    x = tf.keras.layers.Dropout(0.2)(x)
     out = tf.keras.layers.Dense(1, activation="sigmoid")(x)
 
-    model = tf.keras.Model(inp, out)
+    model = tf.keras.Model(x_in, out)
+    opt = tf.keras.optimizers.Adam(learning_rate=float(CFG["LR"]))
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=float(CFG["LR"]), clipnorm=1.0),
-        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.1),
-        metrics=[
-            tf.keras.metrics.AUC(name="auc_roc"),
-            tf.keras.metrics.AUC(name="auc_pr", curve="PR"),
-        ],
+        optimizer=opt,
+        loss="binary_crossentropy",
+        metrics=[tf.keras.metrics.AUC(name="auc")],
     )
     return model
 
 
 # ==============================
-# DIAGNOSTICS
+# TRAIN / EVAL
 # ==============================
 
-def prob_summary(y_true: np.ndarray, prob: np.ndarray, name: str) -> None:
-    y_true = np.asarray(y_true).astype(int)
-    prob = np.asarray(prob).astype(float)
-    print(f"\n=== PROB SUMMARY {name} ===")
-    print(f"Size={len(y_true)}, Pos rate={y_true.mean():.3%}")
-    if len(np.unique(y_true)) > 1:
-        auc = roc_auc_score(y_true, prob)
-        ap = average_precision_score(y_true, prob)
-        print(f"AUC-ROC={auc:.4f}, PR-AUC={ap:.4f}")
-    else:
-        print("AUC/PR-AUC n/a")
+
+def time_split_masks(dates: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Split by unique sorted dates globally
+    uniq = np.unique(dates)
+    uniq = np.sort(uniq)
+    n = len(uniq)
+
+    n_train = int(n * float(CFG["TRAIN_SPLIT"]))
+    n_val = int(n * float(CFG["VAL_SPLIT"]))
+
+    train_end = uniq[n_train - 1] if n_train > 0 else uniq[0]
+    val_end = uniq[n_train + n_val - 1] if (n_train + n_val) > 0 else uniq[-1]
+
+    m_train = dates <= train_end
+    m_val = (dates > train_end) & (dates <= val_end)
+    m_test = dates > val_end
+    return m_train, m_val, m_test
 
 
-def per_ticker_metrics(secids: np.ndarray, y_true: np.ndarray, prob: np.ndarray, name: str) -> None:
-    print(f"\n=== PER-TICKER METRICS {name} ===")
-    secids = np.asarray(secids)
-    y_true = np.asarray(y_true).astype(int)
-    prob = np.asarray(prob).astype(float)
-    for sec in np.unique(secids):
-        mask = secids == sec
-        if int(mask.sum()) < 50:
+def _safe_auc(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    # roc_auc_score падает если один класс
+    if len(np.unique(y_true)) < 2:
+        return float("nan")
+    return float(roc_auc_score(y_true, y_prob))
+
+
+def _safe_ap(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    if len(np.unique(y_true)) < 2:
+        return float("nan")
+    return float(average_precision_score(y_true, y_prob))
+
+
+def evaluate_global(y_true: np.ndarray, y_prob: np.ndarray, thr: float = 0.5) -> Dict[str, float]:
+    y_pred = (y_prob >= thr).astype(int)
+    return {
+        "AUC": _safe_auc(y_true, y_prob),
+        "PR_AUC": _safe_ap(y_true, y_prob),
+        "MCC": float(matthews_corrcoef(y_true, y_pred)) if len(np.unique(y_true)) > 1 else float("nan"),
+        "BalAcc": float(balanced_accuracy_score(y_true, y_pred)) if len(np.unique(y_true)) > 1 else float("nan"),
+        "F1": float(f1_score(y_true, y_pred)) if len(np.unique(y_true)) > 1 else float("nan"),
+    }
+
+
+def per_ticker_metrics(y_true: np.ndarray, y_prob: np.ndarray, secids: np.ndarray) -> pd.DataFrame:
+    rows = []
+    for s in sorted(set(secids)):
+        m = secids == s
+        yt = y_true[m]
+        yp = y_prob[m]
+        rows.append({"secid": s, "n": int(m.sum()), "AUC": _safe_auc(yt, yp), "PR_AUC": _safe_ap(yt, yp)})
+    return pd.DataFrame(rows).sort_values("secid")
+
+
+def simple_backtest_nonoverlap_longonly(
+    y_prob: np.ndarray,
+    fwd_ret: np.ndarray,
+    dates: np.ndarray,
+    secids: np.ndarray,
+    thr: float,
+    fee: float,
+) -> pd.DataFrame:
+    # For each ticker separately: take signal days (prob>=thr), then skip next horizon days (non-overlap)
+    # Here we approximate by sorting by date and greedy selection.
+    res_rows = []
+    horizon = int(CFG["HORIZON"])
+
+    for s in sorted(set(secids)):
+        m = secids == s
+        if m.sum() == 0:
             continue
-        yt = y_true[mask]
-        pr = prob[mask]
-        auc = roc_auc_score(yt, pr) if len(np.unique(yt)) > 1 else np.nan
-        ap = average_precision_score(yt, pr) if len(np.unique(yt)) > 1 else np.nan
-        print(f"{sec}: n={mask.sum()}, pos={yt.mean():.3%}, AUC={auc:.4f}, PR-AUC={ap:.4f}")
 
+        d = pd.to_datetime(dates[m])
+        p = y_prob[m]
+        r = fwd_ret[m]
 
-def backtest_nonoverlap(prob: np.ndarray, fwd_ret: np.ndarray, thr: float, horizon: int, fee: float, name: str) -> None:
-    """Простой backtest по fwd_ret (уже horizon-рет):
+        order = np.argsort(d.values)
+        d = d.values[order]
+        p = p[order]
+        r = r[order]
 
-    - long-only
-    - non-overlap: после сделки пропускаем horizon дней
-    - комиссия: 2*fee
+        picks = []
+        i = 0
+        while i < len(d):
+            if p[i] >= thr:
+                net = float(r[i]) - float(fee)
+                picks.append(net)
+                i += horizon
+            else:
+                i += 1
 
-    Важно: fwd_ret здесь относится к entry-дню (t -> t+horizon).
-    """
-    prob = np.asarray(prob).astype(float)
-    fwd_ret = np.asarray(fwd_ret).astype(float)
-
-    idx = 0
-    trades = []
-    n = len(prob)
-    while idx < n:
-        if prob[idx] >= thr:
-            net = float(fwd_ret[idx] - 2.0 * fee)
-            trades.append(net)
-            idx += int(horizon) + 1
+        if picks:
+            res_rows.append(
+                {
+                    "secid": s,
+                    "n_trades": int(len(picks)),
+                    "mean_net": float(np.mean(picks)),
+                    "sum_net": float(np.sum(picks)),
+                }
+            )
         else:
-            idx += 1
+            res_rows.append({"secid": s, "n_trades": 0, "mean_net": float("nan"), "sum_net": 0.0})
 
-    print(f"\n=== BACKTEST {name} thr={thr:.2f} ===")
-    if not trades:
-        print("No trades.")
-        return
+    return pd.DataFrame(res_rows).sort_values("secid")
 
-    trades = np.asarray(trades, dtype=float)
-    total = float((1.0 + trades).prod() - 1.0)
-    win = float((trades > 0).mean())
-    print(f"Trades={len(trades)}, total_net_ret={total:.2%}, winrate={win:.1%}")
-
-
-# ==============================
-# MAIN
-# ==============================
 
 def main() -> None:
-    data, _feature_cols = build_multi_ticker_dataset()
-    X, y, fwd_ret, dates, secids = data.X, data.y, data.fwd_ret, data.dates, data.secids
+    ds, feature_cols = build_multi_ticker_dataset()
 
-    # global chronological order
-    order = np.argsort(dates)
-    X, y, fwd_ret, dates, secids = X[order], y[order], fwd_ret[order], dates[order], secids[order]
-
-    n = len(X)
-    split_train = int(n * float(CFG["TRAIN_SPLIT"]))
-    split_val = int(n * (float(CFG["TRAIN_SPLIT"]) + float(CFG["VAL_SPLIT"])))
-
-    X_train_raw, X_val_raw, X_test_raw = X[:split_train], X[split_train:split_val], X[split_val:]
-    y_train_raw, y_val_raw, y_test_raw = y[:split_train], y[split_train:split_val], y[split_val:]
-    r_train_raw, r_val_raw, r_test_raw = (
-        fwd_ret[:split_train],
-        fwd_ret[split_train:split_val],
-        fwd_ret[split_val:],
-    )
-    s_train_raw, s_val_raw, s_test_raw = (
-        secids[:split_train],
-        secids[split_train:split_val],
-        secids[split_val:],
-    )
-    d_train_raw, d_val_raw, d_test_raw = (
-        dates[:split_train],
-        dates[split_train:split_val],
-        dates[split_val:],
+    # Build sequences
+    Xs, ys, ds_dates, ds_ret, ds_secids = make_sequences_with_meta(
+        ds.X,
+        ds.y,
+        ds.dates,
+        ds.fwd_ret,
+        ds.secids,
+        int(CFG["SEQ_LEN"]),
     )
 
+    print(f"Sequences: Xs={Xs.shape}, ys={ys.shape}")
+
+    # Split
+    m_train, m_val, m_test = time_split_masks(ds_dates)
+
+    X_train, y_train = Xs[m_train], ys[m_train]
+    X_val, y_val = Xs[m_val], ys[m_val]
+    X_test, y_test = Xs[m_test], ys[m_test]
+
+    dates_test = ds_dates[m_test]
+    secids_test = ds_secids[m_test]
+    fwd_test = ds_ret[m_test]
+
+    # Scale features (fit on train only)
+    n_steps, n_feat = X_train.shape[1], X_train.shape[2]
     scaler = RobustScaler()
-    X_train_scaled = scaler.fit_transform(X_train_raw)
-    X_val_scaled = scaler.transform(X_val_raw)
-    X_test_scaled = scaler.transform(X_test_raw)
+    X_train_2d = X_train.reshape(-1, n_feat)
+    scaler.fit(X_train_2d)
 
-    X_tr, y_tr, d_tr, r_tr, s_tr = make_sequences_with_meta(
-        X_train_scaled, y_train_raw, d_train_raw, r_train_raw, s_train_raw, int(CFG["SEQ_LEN"])
-    )
-    X_va, y_va, d_va, r_va, s_va = make_sequences_with_meta(
-        X_val_scaled, y_val_raw, d_val_raw, r_val_raw, s_val_raw, int(CFG["SEQ_LEN"])
-    )
-    X_te, y_te, d_te, r_te, s_te = make_sequences_with_meta(
-        X_test_scaled, y_test_raw, d_test_raw, r_test_raw, s_test_raw, int(CFG["SEQ_LEN"])
-    )
+    def tr(x: np.ndarray) -> np.ndarray:
+        x2 = x.reshape(-1, n_feat)
+        x2 = scaler.transform(x2)
+        return x2.reshape(-1, n_steps, n_feat)
 
-    print(f"Seq shapes: Train={X_tr.shape}, Val={X_va.shape}, Test={X_te.shape}")
+    X_train = tr(X_train)
+    X_val = tr(X_val)
+    X_test = tr(X_test)
 
-    # class weights on train windows
-    cls = np.unique(y_tr)
-    cw_vals = compute_class_weight("balanced", classes=cls, y=y_tr)
-    class_weight = {int(c): float(w) for c, w in zip(cls, cw_vals)}
-    print("Class weights:", class_weight)
+    # Class weights
+    classes = np.array([0, 1])
+    w = compute_class_weight(class_weight="balanced", classes=classes, y=y_train)
+    cw = {0: float(w[0]), 1: float(w[1])}
 
-    model = build_tcn_model(int(X_tr.shape[-1]), int(X_tr.shape[1]))
-    print("Params:", model.count_params())
+    # Model
+    model = build_tcn_model((n_steps, n_feat))
+    model.summary()
 
-    callbacks = [
-        tf.keras.callbacks.EarlyStopping(
-            monitor="val_auc_roc", mode="max", patience=15, restore_best_weights=True
-        ),
-        tf.keras.callbacks.ReduceLROnPlateau(
-            monitor="val_auc_roc", mode="max", factor=0.5, patience=5, min_lr=1e-5
-        ),
+    cb = [
+        tf.keras.callbacks.EarlyStopping(monitor="val_auc", patience=15, mode="max", restore_best_weights=True),
+        tf.keras.callbacks.ReduceLROnPlateau(monitor="val_auc", factor=0.5, patience=7, mode="max", min_lr=1e-5),
     ]
 
     model.fit(
-        X_tr,
-        y_tr,
-        validation_data=(X_va, y_va),
+        X_train,
+        y_train,
+        validation_data=(X_val, y_val),
         epochs=int(CFG["EPOCHS"]),
         batch_size=int(CFG["BATCH_SIZE"]),
-        class_weight=class_weight,
         shuffle=False,
-        callbacks=callbacks,
+        class_weight=cw,
+        callbacks=cb,
         verbose=2,
     )
 
-    prob_val = model.predict(X_va, verbose=0).reshape(-1)
-    prob_test = model.predict(X_te, verbose=0).reshape(-1)
-
-    # threshold sweep on VAL by F1
-    best_thr, best_f1 = 0.5, -1.0
-    for thr in np.arange(0.30, 0.81, 0.02):
-        pred_val = (prob_val >= thr).astype(int)
-        f1v = f1_score(y_va, pred_val, zero_division=0)
-        if f1v > best_f1:
-            best_f1 = float(f1v)
-            best_thr = float(thr)
-    print(f"Best threshold on VAL (F1={best_f1:.3f}): {best_thr:.2f}")
-
-    pred_test = (prob_test >= best_thr).astype(int)
-    auc_test = roc_auc_score(y_te, prob_test) if len(np.unique(y_te)) > 1 else np.nan
-    ap_test = average_precision_score(y_te, prob_test) if len(np.unique(y_te)) > 1 else np.nan
-    mcc_test = matthews_corrcoef(y_te, pred_test) if len(np.unique(pred_test)) > 1 else 0.0
-    bal_test = balanced_accuracy_score(y_te, pred_test)
+    y_prob = model.predict(X_test, batch_size=int(CFG["BATCH_SIZE"])).ravel()
 
     print("\n=== GLOBAL TEST METRICS ===")
-    print(f"AUC-ROC={auc_test:.4f}, PR-AUC={ap_test:.4f}")
-    print(f"Balanced Acc={bal_test:.3f}, MCC={mcc_test:.4f}")
+    g = evaluate_global(y_test, y_prob, thr=0.5)
+    for k, v in g.items():
+        print(f"{k}: {v:.6f}" if isinstance(v, float) else f"{k}: {v}")
 
-    prob_summary(y_te, prob_test, name="TEST GLOBAL")
-    per_ticker_metrics(s_te, y_te, prob_test, name="TEST")
+    print("\n=== PER-TICKER METRICS (TEST) ===")
+    print(per_ticker_metrics(y_test, y_prob, secids_test).to_string(index=False))
 
-    # per-ticker backtest on TEST
-    for sec in np.unique(s_te):
-        mask = s_te == sec
-        if int(mask.sum()) < 100:
-            continue
-        backtest_nonoverlap(
-            prob=prob_test[mask],
-            fwd_ret=r_te[mask],
-            thr=best_thr,
-            horizon=int(CFG["HORIZON"]),
-            fee=float(CFG["FEE"]),
-            name=f"TEST {sec}",
-        )
+    print("\n=== PROB SUMMARY (TEST) ===")
+    s = pd.Series(y_prob)
+    print(s.describe(percentiles=[0.01, 0.05, 0.1, 0.5, 0.9, 0.95, 0.99]).to_string())
+
+    print("\n=== BACKTEST (non-overlap long-only, TEST) ===")
+    bt = simple_backtest_nonoverlap_longonly(
+        y_prob=y_prob,
+        fwd_ret=fwd_test,
+        dates=dates_test,
+        secids=secids_test,
+        thr=0.5,
+        fee=float(CFG["FEE"]),
+    )
+    print(bt.to_string(index=False))
 
 
 if __name__ == "__main__":

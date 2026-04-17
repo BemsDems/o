@@ -1266,6 +1266,20 @@ print("Div rows:", len(divs))
 
 print("\nBuilding features (Russian sources only)...")
 feat = build_features(sber, usd, imo, key_rate, divs)
+
+# ----- FUNDAMENTAL INTEGRATION CHECK -----
+fund_cols = [
+    "revenue", "net_income", "eps", "roe", "pb_ratio", "net_margin", "value_quality"
+]
+print("\nFUNDAMENTAL COLUMNS IN DATASET:")
+for c in fund_cols:
+    if c in feat.columns:
+        nn = int(feat[c].notna().sum())
+        mean = float(feat[c].dropna().mean()) if nn > 0 else None
+        print(c, "non-null =", nn, "mean =", mean)
+    else:
+        print(c, "MISSING")
+
 feat = add_target(feat, CFG["HORIZON"], CFG["THR_MOVE"])
 
 # Optional (drift reduction): train/val/test on a fresher regime only
@@ -1293,6 +1307,9 @@ FEATURES = [
     "key_rate_chg", "rate_rising",
 ]
 FEATURES = [c for c in FEATURES if c in feat.columns]
+print("\nSELECTED FEATURES:")
+print(FEATURES)
+
 print(f"Признаков используется: {len(FEATURES)}")
 print(FEATURES)
 

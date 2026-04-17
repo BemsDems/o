@@ -1438,6 +1438,23 @@ def run_once(run_seed: int, prepared: Dict[str, Any]) -> Dict[str, Any]:
     if SHOW_MODEL_SUMMARY:
         model.summary()
 
+    class ShortMetrics(tf.keras.callbacks.Callback):
+        def __init__(self, every: int = 5):
+            super().__init__()
+            self.every = every
+
+        def on_epoch_end(self, epoch, logs=None):
+            logs = logs or {}
+            ep = epoch + 1
+            if ep == 1 or ep % self.every == 0:
+                print(
+                    f"ep={ep:03d} "
+                    f"loss={logs.get('loss', np.nan):.4f} "
+                    f"val_loss={logs.get('val_loss', np.nan):.4f} "
+                    f"val_auc_pr={logs.get('val_auc_pr', np.nan):.4f} "
+                    f"val_auc_roc={logs.get('val_auc_roc', np.nan):.4f}"
+                )
+
     callbacks = [
         tf.keras.callbacks.EarlyStopping(
             monitor="val_auc_pr",

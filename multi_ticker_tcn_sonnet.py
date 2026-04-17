@@ -68,6 +68,10 @@ CFG: Dict[str, Any] = {
 
     # Extended (diploma) diagnostics — can be slow (plots/permutation).
     "EXTENDED_DIAGNOSTICS": True,
+
+    # Multi-run experiment (can be slow)
+    "N_RUNS": 1,
+    "SEED_STEP": 1,
 }
 
 np.random.seed(int(CFG["SEED"]))
@@ -592,6 +596,23 @@ def simple_backtest_nonoverlap_longonly(
     return pd.DataFrame(res_rows).sort_values("secid")
 
 
+def ece_score(y_true: np.ndarray, prob: np.ndarray, n_bins: int = 10) -> float:
+    """Expected Calibration Error (ECE)."""
+    y_true = y_true.astype(int)
+    prob = np.clip(prob.astype(float), 1e-6, 1 - 1e-6)
+    bins = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+    for i in range(n_bins):
+        lo, hi = bins[i], bins[i + 1]
+        mask = (prob >= lo) & (prob < hi) if i < n_bins - 1 else (prob >= lo) & (prob <= hi)
+        if mask.sum() == 0:
+            continue
+        acc = float(y_true[mask].mean())
+        conf = float(prob[mask].mean())
+        ece += float(mask.mean()) * abs(acc - conf)
+    return float(ece)
+
+
 # ==============================
 # EXTENDED DIAGNOSTICS (for diploma)
 # ==============================
@@ -800,7 +821,12 @@ def check_random_baseline(y_true: np.ndarray, n_iterations: int = 100):
     print(f"2-sigma threshold: {mu + 2*sd:.4f}")
 
 
-def main() -> None:
+def main(*, run_seed: int | None = None) -> dict:
+    # Optional per-run seed (for repeated experiments)
+    if run_seed is not None:
+        np.random.seed(int(run_seed))
+        tf.random.set_seed(int(run_seed))
+
     ds, feature_cols = build_multi_ticker_dataset()
 
     print("\n=== NaN DIAGNOSTICS (RAW FEATURES) ===")
@@ -982,8 +1008,43 @@ def main() -> None:
     )
     print(bt.to_string(index=False))
 
+    # ------------------------------
+    # Return key metrics for multi-run aggregation
+    # ------------------------------
+    auc_test = float(roc_auc_score(y_test, y_prob)) if len(np.unique(y_test)) > 1 else float("nan")
+    prob0 = y_prob[y_test == 0]
+    prob1 = y_prob[y_test == 1]
+    separation = float(abs(prob1.mean() - prob0.mean())) if (len(prob0) and len(prob1)) else float("nan")
+    ece = float(ece_score(y_test, y_prob, n_bins=10))
+
+    return {
+        "auc": auc_test,
+        "separation": separation,
+        "ece": ece,
+    }
+
+
 
 if __name__ == "__main__":
-    # Disable TF excessive logs if desired
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-    main()
+
+    n_runs = int(CFG.get("N_RUNS", 1))
+    seed0 = int(CFG.get("SEED", 42))
+    seed_step = int(CFG.get("SEED_STEP", 1))
+
+    if n_runs <= 1:
+        _ = main(run_seed=seed0)
+    else:
+        results = []
+        for i in range(n_runs):
+            run_seed = seed0 + i * seed_step
+            res = main(run_seed=run_seed)
+            results.append(res)
+            print(f"Run {i+1}/{n_runs}: AUC={res['auc']:.3f} sep={res['separation']:.3f} ece={res['ece']:.3f}")
+
+        df = pd.DataFrame(results)
+        print("\n=== MULTI-RUN SUMMARY ===")
+        print(df.describe().to_string())
+        if "auc" in df.columns:
+            print(f"Best AUC: {df['auc'].max():.3f}")
+            print(f"Mean AUC: {df['auc'].mean():.3f} ± {df['auc'].std():.3f}")

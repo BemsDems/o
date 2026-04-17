@@ -46,9 +46,8 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import RobustScaler
 from sklearn.utils.class_weight import compute_class_weight
-from sklearn.calibration import CalibratedClassifierCV
+from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import precision_recall_curve
-from sklearn.base import BaseEstimator, ClassifierMixin
 
 
 # ==============================
@@ -973,41 +972,38 @@ def main() -> None:
         verbose=2,
     )
 
-
-
-    # ==============================
-    # CALIBRATION (Platt scaling) on VAL
-    # ==============================
-    class KerasClassifierWrapper(BaseEstimator, ClassifierMixin):
-        def __init__(self, model):
-            self.model = model
-
-        def fit(self, X, y):
-            return self
-
-        def predict_proba(self, X):
-            prob = self.model.predict(X, verbose=0).ravel()
-            prob = np.clip(prob, 1e-6, 1 - 1e-6)
-            return np.column_stack([1 - prob, prob])
-
     print("\n=== CALIBRATING MODEL ===")
-    wrapped_model = KerasClassifierWrapper(model)
-    calibrator = CalibratedClassifierCV(wrapped_model, method="sigmoid", cv="prefit")
-    calibrator.fit(X_val, y_val)
 
-    # ==============================
-    # THRESHOLD OPTIMIZATION (precision target) on VAL
-    # ==============================
+    # Raw probabilities on validation
+    y_prob_val_raw = model.predict(X_val, verbose=0).ravel()
+
+    # Isotonic regression calibration (simple + robust integration)
+    iso_reg = IsotonicRegression(out_of_bounds="clip")
+    iso_reg.fit(y_prob_val_raw, y_val)
+
+    # Apply calibration
+    y_prob_test_raw = model.predict(X_test, verbose=0).ravel()
+    y_prob = iso_reg.transform(y_prob_test_raw)
+
+    print(f"Before calibration: mean={y_prob_test_raw.mean():.3f}, std={y_prob_test_raw.std():.3f}")
+    print(f"After calibration:  mean={y_prob.mean():.3f}, std={y_prob.std():.3f}")
+    print(f"True positive rate: {y_test.mean():.3f}")
+
+    # Calibrated validation probs for threshold search
+    y_prob_val = iso_reg.transform(y_prob_val_raw)
+
     print("\n=== THRESHOLD OPTIMIZATION ===")
-    val_prob_cal = calibrator.predict_proba(X_val)[:, 1]
-    precision, recall, thresholds = precision_recall_curve(y_val, val_prob_cal)
 
-    target_precision = 0.30
+    # Use CALIBRATED probabilities on validation
+    precision, recall, thresholds = precision_recall_curve(y_val, y_prob_val)
+
+    # Strategy 1: Precision >= 0.25
+    target_precision = 0.25
     mask = precision >= target_precision
-    if mask.any() and len(thresholds) > 0:
+
+    if mask.any():
         idx = np.where(mask)[0][-1]
-        idx = min(idx, len(thresholds) - 1)
-        best_thr = float(thresholds[idx])
+        best_thr = float(thresholds[idx]) if idx < len(thresholds) else 0.5
         best_precision = float(precision[idx])
         best_recall = float(recall[idx])
     else:
@@ -1017,21 +1013,20 @@ def main() -> None:
         best_precision = float(precision[idx])
         best_recall = float(recall[idx])
 
-    best_f1 = float(2 * best_precision * best_recall / (best_precision + best_recall + 1e-12))
+    f1 = float(2 * best_precision * best_recall / (best_precision + best_recall + 1e-12))
+
     print(f"Optimized threshold: {best_thr:.3f}")
-    print(f" Precision: {best_precision:.3f}")
+    print(f" Target precision: {target_precision:.3f}")
+    print(f" Actual precision: {best_precision:.3f}")
     print(f" Recall: {best_recall:.3f}")
-    print(f" F1: {best_f1:.3f}")
+    print(f" F1-score: {f1:.3f}")
 
-    # Predict (raw + calibrated)
-    y_prob_raw = model.predict(X_test, verbose=0).ravel()
-    y_prob = calibrator.predict_proba(X_test)[:, 1]
+    # Top-N strategy (diagnostic)
+    top_n_pct = 20
+    top_n_threshold = float(np.percentile(y_prob_val, 100 - top_n_pct))
+    print(f"\nTop-{top_n_pct}% threshold: {top_n_threshold:.3f}")
 
-    print(f"Before calibration: mean={float(y_prob_raw.mean()):.3f}")
-    print(f"After calibration:  mean={float(y_prob.mean()):.3f}")
-    print(f"True positive rate: {float(y_test.mean()):.3f}")
-
-
+    # Prediction sanity check
     # Prediction sanity check
     if np.isnan(y_prob).any():
         print("\nWARNING: NaN in predictions — model likely failed to train")

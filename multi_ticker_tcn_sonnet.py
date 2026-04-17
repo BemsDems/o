@@ -277,41 +277,40 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
 
 
 def time_split_masks(dates: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Time split by global date axis.
+    """Разбиение по уникальным датам (без утечки будущего).
 
-    Guardrails:
-    - If dates is empty (e.g., no sequences built), raise a clear error instead
-      of crashing with IndexError.
-    - Ensure train/val/test are non-empty enough to proceed.
+    moexalgo/feature filtering может привести к пустым данным — в этом случае
+    кидаем понятную ошибку вместо IndexError.
     """
-    if dates is None or len(dates) == 0:
-        raise RuntimeError(
-            "No sequences were created (empty dates array). "
-            "Likely reasons: too little data after feature dropna/horizon trim, "
-            "too large SEQ_LEN, or tickers have sparse history for the chosen START/END. "
-            "Try: reduce SEQ_LEN, move START forward, or verify tickers."
-        )
-
     uniq = np.unique(dates)
+
+    # guard: no dates -> nothing to split
+    if len(uniq) == 0:
+        raise ValueError("Нет данных для разбиения! Проверьте загрузку тикеров.")
+
     uniq = np.sort(uniq)
     n = int(len(uniq))
-    if n == 0:
-        raise RuntimeError("Empty unique date axis after sequence build.")
 
-    # Ensure at least 1 date in each split where possible
-    n_train = max(1, int(n * float(CFG["TRAIN_SPLIT"])))
-    n_val = max(1, int(n * float(CFG["VAL_SPLIT"])))
+    n_train = int(n * float(CFG["TRAIN_SPLIT"]))
+    n_val = int(n * float(CFG["VAL_SPLIT"]))
+
+    # граничные условия
+    if n_train == 0:
+        n_train = 1
+    if n_val == 0:
+        n_val = 1
     if n_train + n_val >= n:
-        # leave at least one date for test
-        n_val = max(1, n - n_train - 1)
+        n_train = max(1, n - 2)
+        n_val = 1
 
     train_end = uniq[n_train - 1]
     val_end = uniq[min(n_train + n_val - 1, n - 1)]
 
-    m_train = dates <= train_end
-    m_val = (dates > train_end) & (dates <= val_end)
-    m_test = dates > val_end
-    return m_train, m_val, m_test
+    train_mask = dates <= train_end
+    val_mask = (dates > train_end) & (dates <= val_end)
+    test_mask = dates > val_end
+
+    return train_mask, val_mask, test_mask
 
 
 def _safe_auc(y_true: np.ndarray, y_prob: np.ndarray) -> float:

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 import pickle
+import random
+from io import StringIO
 from typing import Optional, Tuple
 
 import numpy as np
@@ -73,8 +75,26 @@ SHOW_MODEL_SUMMARY = False
 SHOW_TRAIN_VAL_DIAG = False
 FIT_VERBOSE = 0
 
-np.random.seed(42)
-tf.random.set_seed(42)
+
+
+
+def set_global_seed(seed: int):
+    # Best-effort reproducibility across Python/NumPy/TensorFlow.
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+    try:
+        tf.keras.utils.set_random_seed(seed)
+    except Exception:
+        pass
+    try:
+        tf.config.experimental.enable_op_determinism()
+    except Exception:
+        pass
+
+
+set_global_seed(42)
 
 # ----------------------------
 # 1) DATA LOADERS (Russian sources)
@@ -99,7 +119,7 @@ def cbr_key_rate_range(start: str, end: str) -> pd.DataFrame:
     }
 
     html = requests.get(url, params=params, timeout=30).text
-    tables = pd.read_html(html)
+    tables = pd.read_html(StringIO(html))
     if not tables:
         return pd.DataFrame(columns=["date", "key_rate"])
 
@@ -178,7 +198,7 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
 
 
 def add_dividend_past_only_features(df: pd.DataFrame, div: pd.DataFrame) -> pd.DataFrame:
-    """Non-leaky: only last known dividend (as-of merge backward)."""
+    """Non-leaky: only last known dividend and derived past-only features."""
     out = df.copy().sort_index()
 
     tmp = out.reset_index().rename(columns={out.index.name or out.reset_index().columns[0]: "date"})
@@ -187,30 +207,55 @@ def add_dividend_past_only_features(df: pd.DataFrame, div: pd.DataFrame) -> pd.D
     tmp["last_dividend"] = 0.0
     tmp["days_since_last_dividend"] = 9999
     tmp["last_div_yield_approx"] = 0.0
+    tmp["div_paid_recent_30d"] = 0
+    tmp["div_growth_last"] = 0.0
+    tmp["div_sum_365d"] = 0.0
 
     if div is None or div.empty:
-        out = tmp.set_index("date")
-        return out
+        return tmp.set_index("date")
 
     div2 = div.copy()
     div2["date"] = pd.to_datetime(div2["date"], errors="coerce")
-    div2 = div2.dropna().sort_values("date")
+    div2 = div2.dropna().sort_values("date").reset_index(drop=True)
 
-    # past-only merge: last dividend by date
-    tmp = pd.merge_asof(tmp.sort_values("date"), div2[["date", "dividend_rub"]].sort_values("date"), on="date", direction="backward")
+    tmp = pd.merge_asof(
+        tmp.sort_values("date"),
+        div2[["date", "dividend_rub"]].sort_values("date"),
+        on="date",
+        direction="backward",
+    )
     tmp["dividend_rub"] = tmp["dividend_rub"].fillna(0.0)
 
     tmp["last_dividend"] = tmp["dividend_rub"]
-    # approximate yield
-    tmp["last_div_yield_approx"] = tmp["last_dividend"] / (tmp["Close"].replace(0, np.nan))
+
+    tmp["last_div_yield_approx"] = tmp["last_dividend"] / tmp["Close"].replace(0, np.nan)
     tmp["last_div_yield_approx"] = tmp["last_div_yield_approx"].fillna(0.0)
 
-    # days since last dividend
     last_div_date = tmp["date"].where(tmp["dividend_rub"] > 0).ffill()
     tmp["days_since_last_dividend"] = (tmp["date"] - last_div_date).dt.days.fillna(9999).astype(int)
 
-    out = tmp.set_index("date")
-    return out
+    tmp["div_paid_recent_30d"] = (tmp["days_since_last_dividend"] <= 30).astype(int)
+
+    if len(div2) >= 2:
+        div2["prev_dividend"] = div2["dividend_rub"].shift(1)
+        div2["div_growth_last"] = div2["dividend_rub"] / div2["prev_dividend"].replace(0, np.nan) - 1.0
+        div2["div_growth_last"] = div2["div_growth_last"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+        tmp = pd.merge_asof(
+            tmp.sort_values("date"),
+            div2[["date", "div_growth_last"]].sort_values("date"),
+            on="date",
+            direction="backward",
+        )
+        tmp["div_growth_last"] = tmp["div_growth_last"].fillna(0.0)
+    else:
+        tmp["div_growth_last"] = 0.0
+
+    div_events = div2.set_index("date")["dividend_rub"].sort_index()
+    daily_div = div_events.reindex(tmp["date"]).fillna(0.0)
+    tmp["div_sum_365d"] = daily_div.rolling(365, min_periods=1).sum().values
+
+    return tmp.set_index("date")
 
 
 def build_features(
@@ -678,22 +723,30 @@ feat = augment_with_smartlab(feat, smartlab_df=None)
 # - removed raw key_rate and usd_ret_1
 # - added broader context (5d/20d) and derived macro only
 FEATURES = [
-    # SBER returns/trend
+    # price/trend
     "ret_1", "ret_2", "ret_5", "ret_10", "ret_20", "log_ret",
     "dist_sma20", "dist_sma50", "trend_up_200",
     "rsi_14",
 
-    # Volatility/volume
+    # vol / bands / volume
     "vol_rel",
     "bb_width", "bb_pos",
     "vol_ratio_5_20", "vol_spike",
 
-    # Market / FX context
+    # market context
     "imoex_ret_1", "imoex_ret_5", "imoex_ret_20",
     "sber_vs_imoex_5",
 
-    # Macro: only derivatives
+    # macro
     "key_rate_chg", "rate_rising",
+
+    # dividends
+    "last_dividend",
+    "days_since_last_dividend",
+    "last_div_yield_approx",
+    "div_paid_recent_30d",
+    "div_growth_last",
+    "div_sum_365d",
 ]
 FEATURES = [c for c in FEATURES if c in feat.columns]
 print(f"Признаков используется: {len(FEATURES)}")
@@ -743,7 +796,26 @@ model = build_tcn_model(CFG["WINDOW"], X_train.shape[2], CFG["LR"])
 if SHOW_MODEL_SUMMARY:
     model.summary()
 
+class ShortMetrics(tf.keras.callbacks.Callback):
+    def __init__(self, every=5):
+        super().__init__()
+        self.every = every
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        ep = epoch + 1
+        if ep == 1 or ep % self.every == 0:
+            print(
+                f"ep={ep:03d} "
+                f"loss={logs.get('loss', np.nan):.4f} "
+                f"val_loss={logs.get('val_loss', np.nan):.4f} "
+                f"val_auc_pr={logs.get('val_auc_pr', np.nan):.4f} "
+                f"val_auc_roc={logs.get('val_auc_roc', np.nan):.4f}"
+            )
+
+
 callbacks = [
+
     tf.keras.callbacks.EarlyStopping(
         monitor="val_auc_pr",
         mode="max",
@@ -763,12 +835,12 @@ callbacks = [
         mode="max",
         save_best_only=True,
         save_weights_only=True,
-        verbose=1,
+        verbose=0,
     ),
 ]
 
 
-model.fit(
+history = model.fit(
     X_train,
     y_train,
     validation_data=(X_val, y_val),
@@ -915,4 +987,4 @@ model.save("tcn_ru_model.keras")
 with open("tcn_ru_scaler.pkl", "wb") as f:
     pickle.dump(scaler, f)
 
-print("\nSaved: lstm_ru_model.keras and lstm_ru_scaler.pkl")
+print("\nSaved: tcn_ru_model.keras and tcn_ru_scaler.pkl")

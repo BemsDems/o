@@ -232,7 +232,7 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
     if not rows:
         raise RuntimeError("No tickers loaded. Check MOEX availability / tickers list.")
 
-    full = pd.concat(rows, axis=0).sort_values(["date", "secid"]).reset_index(drop=True)
+    full = pd.concat(rows, axis=0).sort_values(["secid", "date"]).reset_index(drop=True)
 
     feature_cols = [
         "logret_1",
@@ -293,6 +293,98 @@ def make_sequences_with_meta(
         np.asarray(ds),
         np.asarray(rs),
         np.asarray(ss),
+    )
+
+
+
+
+def make_sequences_multi_ticker(
+    X: np.ndarray,
+    y: np.ndarray,
+    dates: np.ndarray,
+    fwd_ret: np.ndarray,
+    secids: np.ndarray,
+    seq_len: int,
+    split_masks: Tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> Tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+]:
+    """Create sequences per ticker and per split (more robust).
+
+    We avoid windows that cross split boundaries and never mix tickers inside a window.
+    split_masks are row-level masks (same length as X/y/dates/secids).
+    """
+    train_mask, val_mask, test_mask = split_masks
+
+    def _collect_for_split(mask_sec: np.ndarray, X_sec, y_sec, d_sec, r_sec, secid: str):
+        Xs, ys, ds, rs, ss = [], [], [], [], []
+        # build window ending at i (exclusive window [i-seq_len, i))
+        for i in range(seq_len, len(X_sec)):
+            if not mask_sec[i]:
+                continue
+            # require the entire window to be inside this split
+            if not mask_sec[i - seq_len : i].all():
+                continue
+            Xs.append(X_sec[i - seq_len : i])
+            ys.append(y_sec[i])
+            ds.append(d_sec[i])
+            rs.append(r_sec[i])
+            ss.append(secid)
+        return (
+            np.asarray(Xs),
+            np.asarray(ys),
+            np.asarray(ds),
+            np.asarray(rs),
+            np.asarray(ss),
+        )
+
+    out = []
+    for mask_global in (train_mask, val_mask, test_mask):
+        out.append(([], [], [], [], []))
+
+    for secid in np.unique(secids):
+        m = secids == secid
+        X_sec = X[m]
+        y_sec = y[m]
+        d_sec = dates[m]
+        r_sec = fwd_ret[m]
+
+        tr_sec = train_mask[m]
+        va_sec = val_mask[m]
+        te_sec = test_mask[m]
+
+        tr = _collect_for_split(tr_sec, X_sec, y_sec, d_sec, r_sec, str(secid))
+        va = _collect_for_split(va_sec, X_sec, y_sec, d_sec, r_sec, str(secid))
+        te = _collect_for_split(te_sec, X_sec, y_sec, d_sec, r_sec, str(secid))
+
+        # append
+        for bucket, part in zip(out, (tr, va, te)):
+            for i, arr in enumerate(part):
+                bucket[i].append(arr)
+
+    def _cat(parts):
+        if not parts:
+            return np.asarray([])
+        parts = [p for p in parts if len(p) > 0]
+        if not parts:
+            return np.asarray([])
+        return np.concatenate(parts, axis=0)
+
+    Xs_tr = _cat(out[0][0]); ys_tr = _cat(out[0][1]); ds_tr = _cat(out[0][2]); rs_tr = _cat(out[0][3]); ss_tr = _cat(out[0][4])
+    Xs_va = _cat(out[1][0]); ys_va = _cat(out[1][1]); ds_va = _cat(out[1][2]); rs_va = _cat(out[1][3]); ss_va = _cat(out[1][4])
+    Xs_te = _cat(out[2][0]); ys_te = _cat(out[2][1]); ds_te = _cat(out[2][2]); rs_te = _cat(out[2][3]); ss_te = _cat(out[2][4])
+
+    print("\nSequences created:")
+    print(f" Train: {len(Xs_tr)} sequences")
+    print(f" Val:   {len(Xs_va)} sequences")
+    print(f" Test:  {len(Xs_te)} sequences")
+
+    return (
+        Xs_tr, ys_tr, ds_tr, rs_tr, ss_tr,
+        Xs_va, ys_va, ds_va, rs_va, ss_va,
+        Xs_te, ys_te, ds_te, rs_te, ss_te,
     )
 
 
@@ -462,37 +554,30 @@ def simple_backtest_nonoverlap_longonly(
 def main() -> None:
     ds, feature_cols = build_multi_ticker_dataset()
 
-    # Build sequences
-    Xs, ys, ds_dates, ds_ret, ds_secids = make_sequences_with_meta(
+    # Split by dates on ROWS (not windows), then build sequences per ticker within each split
+    m_train_rows, m_val_rows, m_test_rows = time_split_masks(ds.dates)
+
+    (
+        X_train, y_train, _, _, _,
+        X_val, y_val, _, _, _,
+        X_test, y_test, dates_test, fwd_test, secids_test,
+    ) = make_sequences_multi_ticker(
         ds.X,
         ds.y,
         ds.dates,
         ds.fwd_ret,
         ds.secids,
         int(CFG["SEQ_LEN"]),
+        split_masks=(m_train_rows, m_val_rows, m_test_rows),
     )
 
-    print(f"Sequences: Xs={Xs.shape}, ys={ys.shape}")
-
-    if Xs.size == 0:
+    if X_train.size == 0 or X_val.size == 0 or X_test.size == 0:
         raise RuntimeError(
-            "No training sequences produced. "
-            "This usually means after feature engineering (dropna) and horizon trim "
-            "there are fewer than SEQ_LEN+1 rows per ticker. "
-            "Try: reduce SEQ_LEN, move START forward (e.g., 2018-01-01), "
-            "or remove illiquid/short-history tickers."
+            "Not enough sequences in one of splits (train/val/test). "
+            "Try: reduce SEQ_LEN, move START forward, increase history, or reduce tickers."
         )
 
-    # Split
-    m_train, m_val, m_test = time_split_masks(ds_dates)
-
-    X_train, y_train = Xs[m_train], ys[m_train]
-    X_val, y_val = Xs[m_val], ys[m_val]
-    X_test, y_test = Xs[m_test], ys[m_test]
-
-    dates_test = ds_dates[m_test]
-    secids_test = ds_secids[m_test]
-    fwd_test = ds_ret[m_test]
+    print(f"Seq shapes: Train={X_train.shape}, Val={X_val.shape}, Test={X_test.shape}")
 
     # Scale features (fit on train only)
     n_steps, n_feat = X_train.shape[1], X_train.shape[2]

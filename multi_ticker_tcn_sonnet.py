@@ -46,7 +46,6 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import RobustScaler
 from sklearn.utils.class_weight import compute_class_weight
-from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import precision_recall_curve
 
 
@@ -436,7 +435,7 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
             kernel_regularizer=tf.keras.regularizers.l2(1e-5),
         )(x)
         x = tf.keras.layers.BatchNormalization()(x)
-        x = tf.keras.layers.Dropout(0.3)(x)
+        x = tf.keras.layers.Dropout(0.4)(x)
 
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
     x = tf.keras.layers.Dense(
@@ -444,13 +443,13 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
         activation="relu",
         kernel_regularizer=tf.keras.regularizers.l2(1e-5),
     )(x)
-    x = tf.keras.layers.Dropout(0.4)(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
     x = tf.keras.layers.Dense(
         32,
         activation="relu",
         kernel_regularizer=tf.keras.regularizers.l2(1e-5),
     )(x)
-    x = tf.keras.layers.Dropout(0.3)(x)
+    x = tf.keras.layers.Dropout(0.4)(x)
     out = tf.keras.layers.Dense(1, activation="sigmoid")(x)
 
     model = tf.keras.Model(x_in, out)
@@ -957,7 +956,7 @@ def main() -> None:
     cb = [
         NanCheck(),
         tf.keras.callbacks.EarlyStopping(monitor="val_auc", patience=10, mode="max", restore_best_weights=True),
-        tf.keras.callbacks.ReduceLROnPlateau(monitor="val_auc", factor=0.5, patience=7, mode="max", min_lr=1e-5),
+        tf.keras.callbacks.ReduceLROnPlateau(monitor="val_auc", factor=0.5, patience=5, mode="max", min_lr=1e-6),
     ]
 
     model.fit(
@@ -972,67 +971,50 @@ def main() -> None:
         verbose=2,
     )
 
-    print("\n=== CALIBRATING MODEL ===")
+    # --- RAW PREDICTIONS (NO CALIBRATION) ---
+    print("\n=== PREDICTIONS ===")
+    y_prob_val = model.predict(X_val, verbose=0).ravel()
+    y_prob = model.predict(X_test, verbose=0).ravel()
 
-    # Raw probabilities on validation
-    y_prob_val_raw = model.predict(X_val, verbose=0).ravel()
-
-    # Isotonic regression calibration (simple + robust integration)
-    iso_reg = IsotonicRegression(out_of_bounds="clip")
-    iso_reg.fit(y_prob_val_raw, y_val)
-
-    # Apply calibration
-    y_prob_test_raw = model.predict(X_test, verbose=0).ravel()
-    y_prob = iso_reg.transform(y_prob_test_raw)
-
-    print(f"Before calibration: mean={y_prob_test_raw.mean():.3f}, std={y_prob_test_raw.std():.3f}")
-    print(f"After calibration:  mean={y_prob.mean():.3f}, std={y_prob.std():.3f}")
-    print(f"True positive rate: {y_test.mean():.3f}")
-
-    # Calibrated validation probs for threshold search
-    y_prob_val = iso_reg.transform(y_prob_val_raw)
-
-    print("\n=== THRESHOLD OPTIMIZATION ===")
-
-    # Use CALIBRATED probabilities on validation
-    precision, recall, thresholds = precision_recall_curve(y_val, y_prob_val)
-
-    # Strategy 1: Precision >= 0.25
-    target_precision = 0.25
-    mask = precision >= target_precision
-
-    if mask.any():
-        idx = np.where(mask)[0][-1]
-        best_thr = float(thresholds[idx]) if idx < len(thresholds) else 0.5
-        best_precision = float(precision[idx])
-        best_recall = float(recall[idx])
-    else:
-        f1_scores = 2 * (precision * recall) / (precision + recall + 1e-10)
-        idx = int(np.argmax(f1_scores))
-        best_thr = float(thresholds[idx]) if idx < len(thresholds) else 0.5
-        best_precision = float(precision[idx])
-        best_recall = float(recall[idx])
-
-    f1 = float(2 * best_precision * best_recall / (best_precision + best_recall + 1e-12))
-
-    print(f"Optimized threshold: {best_thr:.3f}")
-    print(f" Target precision: {target_precision:.3f}")
-    print(f" Actual precision: {best_precision:.3f}")
-    print(f" Recall: {best_recall:.3f}")
-    print(f" F1-score: {f1:.3f}")
-
-    # Top-N strategy (diagnostic)
-    top_n_pct = 20
-    top_n_threshold = float(np.percentile(y_prob_val, 100 - top_n_pct))
-    print(f"\nTop-{top_n_pct}% threshold: {top_n_threshold:.3f}")
+    print(f"Val prob: mean={y_prob_val.mean():.3f}, std={y_prob_val.std():.3f}")
+    print(f"Test prob: mean={y_prob.mean():.3f}, std={y_prob.std():.3f}")
+    print(f"True pos rate (test): {y_test.mean():.3f}")
 
     # Prediction sanity check
-    # Prediction sanity check
-    if np.isnan(y_prob).any():
-        print("\nWARNING: NaN in predictions — model likely failed to train")
+    if np.isnan(y_prob).any() or np.isinf(y_prob).any():
+        print("\nWARNING: NaN/Inf in predictions — model likely failed to train")
         print(f"Train X NaN: {np.isnan(X_train).any()}, Inf: {np.isinf(X_train).any()}")
         return
 
+    # Threshold search on VAL (no calibration)
+    print("\n=== THRESHOLD OPTIMIZATION (on VAL) ===")
+    best_thr = 0.5
+    best_f1 = 0.0
+
+    for thr in np.arange(0.30, 0.85, 0.01):
+        pred = (y_prob_val >= thr).astype(int)
+        if pred.sum() == 0:
+            continue
+        f1v = f1_score(y_val, pred, zero_division=0)
+        if f1v > best_f1:
+            best_f1 = float(f1v)
+            best_thr = float(thr)
+
+    pred_val_best = (y_prob_val >= best_thr).astype(int)
+    prec = precision_score(y_val, pred_val_best, zero_division=0)
+    rec = recall_score(y_val, pred_val_best, zero_division=0)
+
+    print(f"Best threshold: {best_thr:.2f}")
+    print(f" Precision: {prec:.3f}")
+    print(f" Recall: {rec:.3f}")
+    print(f" F1: {best_f1:.3f}")
+    print(f" N signals: {int(pred_val_best.sum())}")
+
+    # If threshold gives no signals on TEST — fallback
+    if int((y_prob >= best_thr).sum()) == 0:
+        print("WARNING: No signals at best_thr, falling back to top-20% threshold")
+        best_thr = float(np.percentile(y_prob, 80))
+        print(f"Fallback threshold: {best_thr:.3f}")
 
     print("\n" + "="*80)
     print("EXTENDED MODEL DIAGNOSTICS")

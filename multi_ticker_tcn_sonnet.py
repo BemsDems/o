@@ -62,7 +62,7 @@ CFG: Dict[str, Any] = {
     "VAL_SPLIT": 0.15,
     "BATCH_SIZE": 64,
     "EPOCHS": 100,
-    "LR": 1e-4,
+    "LR": 3e-4,
     "SEED": 42,
     "FEE": 0.001,
 
@@ -422,7 +422,7 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
 
     x = tf.keras.layers.LayerNormalization()(x_in)
 
-    # TCN blocks with L2 regularization
+    # TCN blocks with MODERATE regularization
     for filters, dilation in [(64, 1), (64, 2), (64, 4), (32, 8)]:
         x = tf.keras.layers.Conv1D(
             filters=filters,
@@ -431,24 +431,24 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
             dilation_rate=dilation,
             activation="relu",
             kernel_initializer="he_normal",
-            kernel_regularizer=tf.keras.regularizers.l2(1e-3),
+            kernel_regularizer=tf.keras.regularizers.l2(1e-5),
         )(x)
         x = tf.keras.layers.BatchNormalization()(x)
-        x = tf.keras.layers.Dropout(0.4)(x)
+        x = tf.keras.layers.Dropout(0.3)(x)
 
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
     x = tf.keras.layers.Dense(
         64,
         activation="relu",
-        kernel_regularizer=tf.keras.regularizers.l2(1e-3),
+        kernel_regularizer=tf.keras.regularizers.l2(1e-5),
     )(x)
-    x = tf.keras.layers.Dropout(0.5)(x)
+    x = tf.keras.layers.Dropout(0.4)(x)
     x = tf.keras.layers.Dense(
         32,
         activation="relu",
-        kernel_regularizer=tf.keras.regularizers.l2(1e-3),
+        kernel_regularizer=tf.keras.regularizers.l2(1e-5),
     )(x)
-    x = tf.keras.layers.Dropout(0.4)(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
     out = tf.keras.layers.Dense(1, activation="sigmoid")(x)
 
     model = tf.keras.Model(x_in, out)
@@ -457,7 +457,7 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
             learning_rate=float(CFG["LR"]),
             clipnorm=1.0,
         ),
-        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.1),
+        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.05),
         metrics=[tf.keras.metrics.AUC(name="auc")],
     )
     return model
@@ -915,7 +915,7 @@ def main() -> None:
 
     cb = [
         NanCheck(),
-        tf.keras.callbacks.EarlyStopping(monitor="val_auc", patience=20, mode="max", restore_best_weights=True),
+        tf.keras.callbacks.EarlyStopping(monitor="val_auc", patience=10, mode="max", restore_best_weights=True),
         tf.keras.callbacks.ReduceLROnPlateau(monitor="val_auc", factor=0.5, patience=7, mode="max", min_lr=1e-5),
     ]
 

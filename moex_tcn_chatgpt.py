@@ -69,6 +69,9 @@ CFG = {
     # backtest assumptions (simple)
     "FEE": 0.001,        # 0.1% per trade (simplified)
     "NON_OVERLAP": True, # skip next HORIZON days after entry
+
+    # Multi-seed evaluation
+    "RUN_SEEDS": [11, 21, 31, 41, 51],
 }
 
 # ----------------------------
@@ -95,10 +98,6 @@ def set_global_seed(seed: int):
         tf.config.experimental.enable_op_determinism()
     except Exception:
         pass
-
-
-set_global_seed(42)
-
 
 
 # HOW TO USE (Fundamentals scaffold)
@@ -1250,363 +1249,453 @@ def drift_report_features(X_train_2d: np.ndarray, X_test_2d: np.ndarray, feature
 # ----------------------------
 # 5) PIPELINE
 # ----------------------------
-print("Loading market series from MOEX...")
-sber = load_candles_moexalgo(CFG["TICKER"], CFG["START"], CFG["END"])
-usd = load_candles_moexalgo("USD000UTSTOM", CFG["START"], CFG["END"])
-imo = load_candles_moexalgo("IMOEX", CFG["START"], CFG["END"])
-print("SBER:", sber.shape, "USD:", usd.shape, "IMOEX:", imo.shape)
-
-print("\nLoading CBR key rate...")
-key_rate = cbr_key_rate_range(CFG["START"], CFG["END"])
-print("Key rate rows:", len(key_rate))
-
-print("\nLoading MOEX dividends...")
-divs = moex_iss_dividends(CFG["TICKER"])
-print("Div rows:", len(divs))
-
-print("\nBuilding features (Russian sources only)...")
-feat = build_features(sber, usd, imo, key_rate, divs)
-
-# ----- FUNDAMENTAL INTEGRATION CHECK -----
-fund_cols = [
-    "revenue", "net_income", "eps", "roe", "pb_ratio", "net_margin", "value_quality"
-]
-print("\nFUNDAMENTAL COLUMNS IN DATASET:")
-for c in fund_cols:
-    if c in feat.columns:
-        nn = int(feat[c].notna().sum())
-        mean = float(feat[c].dropna().mean()) if nn > 0 else None
-        print(c, "non-null =", nn, "mean =", mean)
-    else:
-        print(c, "MISSING")
-
-feat = add_target(feat, CFG["HORIZON"], CFG["THR_MOVE"])
-
-# Optional (drift reduction): train/val/test on a fresher regime only
-# feat = feat.loc["2019-01-01":].copy()
-print("Final dataset:", feat.shape)
-print("Class share (BUY=1):", float(feat["Target"].mean().round(3)))
-
-
-def augment_with_smartlab(df: pd.DataFrame, smartlab_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-    """Reserved hook for future Smart-Lab integration (no-op for now)."""
-    return df
-
-
-feat = augment_with_smartlab(feat, smartlab_df=None)
-
-# "Diploma" stable feature set (more robust / lower drift):
-# - removed sparse/regime factors: dividends
-# - removed raw key_rate and usd_ret_1
-# - added broader context (5d/20d) and derived macro only
-FEATURES = [
-    "ret_1", "ret_2", "ret_5", "ret_10", "ret_20", "log_ret",
-    "dist_sma20", "dist_sma50", "trend_up_200", "rsi_14",
-    "vol_rel", "bb_width", "bb_pos", "vol_ratio_5_20", "vol_spike",
-    "imoex_ret_1", "imoex_ret_5", "imoex_ret_20", "sber_vs_imoex_5",
-    "key_rate_chg", "rate_rising",
-]
-FEATURES = [c for c in FEATURES if c in feat.columns]
-print("\nSELECTED FEATURES:")
-print(FEATURES)
-
-print(f"Признаков используется: {len(FEATURES)}")
-print(FEATURES)
-
-train_idx, val_idx, test_idx = time_splits(feat, CFG["TRAIN_FRAC"], CFG["VAL_FRAC"])
-
-scaler = RobustScaler()
-X_all_2d = feat[FEATURES].values
-y_all = feat["Target"].values.astype(int)
-dates_all = feat.index.values
-future_ret_all = feat["future_ret"].values.astype(float)
-
-X_train_raw_2d = feat.loc[train_idx, FEATURES].values
-
-CLIP_Q = 0.005  # 0.5% / 99.5%
-lo = np.nanquantile(X_train_raw_2d, CLIP_Q, axis=0)
-hi = np.nanquantile(X_train_raw_2d, 1 - CLIP_Q, axis=0)
-
-X_all_2d = np.clip(X_all_2d, lo, hi)
-
-scaler.fit(np.clip(X_train_raw_2d, lo, hi))
-X_all_scaled = scaler.transform(X_all_2d)
-
-Xw, yw, dw = make_windows_aligned(X_all_scaled, y_all, dates_all, CFG["WINDOW"])
-future_ret_w = future_ret_all[CFG["WINDOW"] - 1 :]
-
-train_mask = np.isin(dw, train_idx.values)
-val_mask = np.isin(dw, val_idx.values)
-test_mask = np.isin(dw, test_idx.values)
-
-X_train, y_train = Xw[train_mask], yw[train_mask]
-X_val, y_val = Xw[val_mask], yw[val_mask]
-X_test, y_test = Xw[test_mask], yw[test_mask]
-
-fret_val = future_ret_w[val_mask]
-
-print("\nWindows shapes:")
-print("Train:", X_train.shape, "Val:", X_val.shape, "Test:", X_test.shape)
-
-classes = np.array([0, 1])
-cw = compute_class_weight("balanced", classes=classes, y=y_train)
-class_weight = {0: float(cw[0]), 1: float(cw[1])}
-print("class_weight:", class_weight)
-
-model = build_tcn_model(CFG["WINDOW"], X_train.shape[2], CFG["LR"])
-if SHOW_MODEL_SUMMARY:
-    model.summary()
-
-class ShortMetrics(tf.keras.callbacks.Callback):
-    def __init__(self, every=5):
-        super().__init__()
-        self.every = every
-
-    def on_epoch_end(self, epoch, logs=None):
-        logs = logs or {}
-        ep = epoch + 1
-        if ep == 1 or ep % self.every == 0:
-            print(
-                f"ep={ep:03d} "
-                f"loss={logs.get('loss', np.nan):.4f} "
-                f"val_loss={logs.get('val_loss', np.nan):.4f} "
-                f"val_auc_pr={logs.get('val_auc_pr', np.nan):.4f} "
-                f"val_auc_roc={logs.get('val_auc_roc', np.nan):.4f}"
-            )
-
-
-callbacks = [
-
-    tf.keras.callbacks.EarlyStopping(
-        monitor="val_auc_pr",
-        mode="max",
-        patience=CFG["PATIENCE"],
-        restore_best_weights=True,
-    ),
-    tf.keras.callbacks.ReduceLROnPlateau(
-        monitor="val_auc_pr",
-        mode="max",
-        factor=0.5,
-        patience=5,
-        min_lr=1e-5,
-    ),
-    tf.keras.callbacks.ModelCheckpoint(
-        filepath="tcn_best.weights.h5",
-        monitor="val_auc_pr",
-        mode="max",
-        save_best_only=True,
-        save_weights_only=True,
-        verbose=0,
-    ),
-]
-
-
-history = model.fit(
-    X_train,
-    y_train,
-    validation_data=(X_val, y_val),
-    epochs=CFG["EPOCHS"],
-    batch_size=CFG["BATCH"],
-    class_weight=class_weight,
-    shuffle=False,
-    callbacks=callbacks,
-    verbose=FIT_VERBOSE,
-)
-
-# Load best weights by VAL PR-AUC (stabilize across restarts)
-if os.path.exists("tcn_best.weights.h5"):
-    model.load_weights("tcn_best.weights.h5")
-
-prob_val = model.predict(X_val, verbose=0).reshape(-1)
-prob_test = model.predict(X_test, verbose=0).reshape(-1)
-prob_train = model.predict(X_train, verbose=0).reshape(-1)
-
-# Orientation calibration on the last part of VAL (no TEST leakage)
-N_CAL = min(120, len(y_val))
-auc_tail = roc_auc_score(y_val[-N_CAL:], prob_val[-N_CAL:]) if len(np.unique(y_val[-N_CAL:])) > 1 else 0.5
-auc_tail_inv = roc_auc_score(y_val[-N_CAL:], 1 - prob_val[-N_CAL:]) if len(np.unique(y_val[-N_CAL:])) > 1 else 0.5
-
-FLIP = auc_tail_inv > auc_tail
-if SHOW_TRAIN_VAL_DIAG:
-    print("\n" + "=" * 70)
-    print(f"VAL tail AUC={auc_tail:.3f} | AUC(1-p)={auc_tail_inv:.3f} | FLIP={FLIP}")
-    print("=" * 70)
-
-if FLIP:
-    prob_train = 1 - prob_train
-    prob_val = 1 - prob_val
-    prob_test = 1 - prob_test
-
-# ---- Probabilities + probability quality ----
-if SHOW_TRAIN_VAL_DIAG:
-    prob_summary("TRAIN", y_train, prob_train)
-    prob_summary("VAL", y_val, prob_val)
-prob_summary("TEST", y_test, prob_test)
-
-# ---- Threshold sweeps ----
-if SHOW_TRAIN_VAL_DIAG:
-    sweep_val = threshold_sweep("VAL", y_val, prob_val)
-    sweep_test = threshold_sweep("TEST", y_test, prob_test)
-
-# ---- Decile analysis (ranking) ----
-fret_train = future_ret_w[train_mask]
-fret_val = future_ret_w[val_mask]
-fret_test = future_ret_w[test_mask]
-
-if SHOW_TRAIN_VAL_DIAG:
-    decile_report("TRAIN", y_train, prob_train, fret_train)
-    decile_report("VAL", y_val, prob_val, fret_val)
-decile_report("TEST", y_test, prob_test, fret_test)
-
-# ---- Feature drift (PSI) ----
-# Quick indicator: use the last timestep of each window
-X_train_last = X_train[:, -1, :]
-X_test_last = X_test[:, -1, :]
-drift_report_features(X_train_last, X_test_last, FEATURES, top_k=12)
-
-# ---- Probability drift ----
-p_psi = psi_1d(prob_train, prob_test, n_bins=10)
-print("\n" + "=" * 70)
-print(f"PROB DRIFT PSI(train→test): {p_psi:.3f} (if >0.25 — strong shift)")
-print("=" * 70)
-
-thr_f1, thr_pnl, thr_table = pick_threshold_on_val(y_val, prob_val, fret_val, CFG["HORIZON"], CFG["FEE"])
-
-print(f"\nChosen threshold (VAL max F1(BUY)): {thr_f1:.2f}")
-print(f"Chosen threshold (VAL max avg PnL): {thr_pnl:.2f}")
-
-# ----------------------------
-# COMPACT DASHBOARD (single block)
-# ----------------------------
-_hist = history_summary(history)
-_test = compact_prob_metrics(y_test, prob_test)
-_dec = make_decile_table(y_test, prob_test, future_ret=fret_test, n_bins=10)
-
-# decile spread: top vs bottom buy-rate
-if len(_dec) >= 2:
-    _dec_spread = float(_dec.loc[_dec["decile"].max(), "buy_rate"] - _dec.loc[_dec["decile"].min(), "buy_rate"])
-else:
-    _dec_spread = float("nan")
-
-# Prepare backtest inputs (re-used below)
-_dates_test = dw[test_mask]
-_close_full = sber["Close"]
-
-_bt_f1 = backtest_nonoverlap_long_only_stats(prob_test, _dates_test, _close_full, thr_f1, CFG["HORIZON"], CFG["FEE"])
-_bt_pnl = backtest_nonoverlap_long_only_stats(prob_test, _dates_test, _close_full, thr_pnl, CFG["HORIZON"], CFG["FEE"])
-
-print("\n" + "=" * 70)
-print("=== COMPACT DASHBOARD ===")
-print("=" * 70)
-print(
-    "HISTORY | "
-    f"epochs_run={_hist['epochs_run']} "
-    f"best_epoch={_hist['best_epoch']} "
-    f"best_val_auc_pr={_hist['best_val_auc_pr']:.4f} "
-    f"best_val_auc_roc={_hist['best_val_auc_roc']:.4f} "
-    f"best_val_loss={_hist['best_val_loss']:.4f}"
-)
-
-print(
-    "TEST | "
-    f"roc_auc={_test['roc_auc']:.4f} pr_auc={_test['pr_auc']:.4f} pr_lift={_test['pr_auc_lift']:.4f} | "
-    f"logloss={_test['logloss']:.4f} (gain_vs_base={_test['logloss_gain_vs_baseline']:+.4f}) | "
-    f"ece10={_test['ece10']:.4f} | prob_mean={_test['prob_mean']:.4f}±{_test['prob_std']:.4f} | "
-    f"prob_psi(train→test)={p_psi:.3f}"
-)
-
-inv = bool(_test["roc_auc_inv"] > _test["roc_auc"])
-print(f"inverted_signal={inv} (roc_auc(1-p)={_test['roc_auc_inv']:.4f})")
-print(f"decile_spread(buy_rate top-bottom)={_dec_spread:+.4f}")
-print("deciles (TEST):")
-print(_dec.to_string(index=False))
-
-print("\nBACKTEST TEST (non-overlap, Close):")
-print(
-    f"thr_f1={thr_f1:.2f} | strat={_bt_f1['strategy_return']:+.2%} "
-    f"bh={_bt_f1['buyhold_return']:+.2%} alpha={_bt_f1['alpha']:+.2%} "
-    f"trades={_bt_f1['n_trades']} win={_bt_f1['winrate']:.1%}"
-)
-print(
-    f"thr_pnl={thr_pnl:.2f} | strat={_bt_pnl['strategy_return']:+.2%} "
-    f"bh={_bt_pnl['buyhold_return']:+.2%} alpha={_bt_pnl['alpha']:+.2%} "
-    f"trades={_bt_pnl['n_trades']} win={_bt_pnl['winrate']:.1%}"
-)
-print("=" * 70)
-
-
-
-
-
-
-def backtest_nonoverlap_long_only(prob, dates_signal, close_full, thr, horizon, fee):
-    dates = pd.to_datetime(dates_signal)
-    close_full = close_full.copy()
-    close_full.index = pd.to_datetime(close_full.index)
-
-    # Buy&Hold on the same segment
-    start_date = dates[0]
-    last_date = dates[-1]
-    try:
-        last_loc = close_full.index.get_loc(last_date)
-        end_loc = min(last_loc + horizon, len(close_full.index) - 1)
-        end_date = close_full.index[end_loc]
-    except KeyError:
-        end_date = close_full.index[-1]
-
-    bh_ret = float(close_full.loc[end_date] / close_full.loc[start_date] - 1.0)
-
-    eq = 1.0
-    trades = []
-    i = 0
-    while i < len(prob):
-        if prob[i] >= thr:
-            d0 = dates[i]
-            try:
-                loc0 = close_full.index.get_loc(d0)
-            except KeyError:
-                i += 1
-                continue
-
-            loc1 = loc0 + horizon
-            if loc1 >= len(close_full.index):
-                break
-
-            entry = float(close_full.iloc[loc0])
-            exitp = float(close_full.iloc[loc1])
-            ret = exitp / entry - 1.0 - fee
-
-            eq *= (1.0 + ret)
-            trades.append(ret)
-            i += horizon
+def run_once(run_seed: int) -> dict:
+    """Run one full train/eval cycle for given seed.
+
+    Returns a compact metrics dict for multi-seed aggregation.
+    """
+    set_global_seed(int(run_seed))
+
+    print("Loading market series from MOEX...")
+    sber = load_candles_moexalgo(CFG["TICKER"], CFG["START"], CFG["END"])
+    usd = load_candles_moexalgo("USD000UTSTOM", CFG["START"], CFG["END"])
+    imo = load_candles_moexalgo("IMOEX", CFG["START"], CFG["END"])
+    print("SBER:", sber.shape, "USD:", usd.shape, "IMOEX:", imo.shape)
+
+    print("\nLoading CBR key rate...")
+    key_rate = cbr_key_rate_range(CFG["START"], CFG["END"])
+    print("Key rate rows:", len(key_rate))
+
+    print("\nLoading MOEX dividends...")
+    divs = moex_iss_dividends(CFG["TICKER"])
+    print("Div rows:", len(divs))
+
+    print("\nBuilding features (Russian sources only)...")
+    feat = build_features(sber, usd, imo, key_rate, divs)
+
+    # ----- FUNDAMENTAL INTEGRATION CHECK -----
+    fund_cols = [
+        "revenue", "net_income", "eps", "roe", "pb_ratio", "net_margin", "value_quality"
+    ]
+    print("\nFUNDAMENTAL COLUMNS IN DATASET:")
+    for c in fund_cols:
+        if c in feat.columns:
+            nn = int(feat[c].notna().sum())
+            mean = float(feat[c].dropna().mean()) if nn > 0 else None
+            print(c, "non-null =", nn, "mean =", mean)
         else:
-            i += 1
+            print(c, "MISSING")
 
-    strat_ret = float(eq - 1.0)
-    n_trades = int(len(trades))
-    winrate = float(np.mean(np.array(trades) > 0)) if n_trades else 0.0
+    feat = add_target(feat, CFG["HORIZON"], CFG["THR_MOVE"])
+
+    # Optional (drift reduction): train/val/test on a fresher regime only
+    # feat = feat.loc["2019-01-01":].copy()
+    print("Final dataset:", feat.shape)
+    print("Class share (BUY=1):", float(feat["Target"].mean().round(3)))
+
+
+    def augment_with_smartlab(df: pd.DataFrame, smartlab_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+        """Reserved hook for future Smart-Lab integration (no-op for now)."""
+        return df
+
+
+    feat = augment_with_smartlab(feat, smartlab_df=None)
+
+    # "Diploma" stable feature set (more robust / lower drift):
+    # - removed sparse/regime factors: dividends
+    # - removed raw key_rate and usd_ret_1
+    # - added broader context (5d/20d) and derived macro only
+    FEATURES = [
+        "ret_1", "ret_2", "ret_5", "ret_10", "ret_20", "log_ret",
+        "dist_sma20", "dist_sma50", "trend_up_200", "rsi_14",
+        "vol_rel", "bb_width", "bb_pos", "vol_ratio_5_20", "vol_spike",
+        "imoex_ret_1", "imoex_ret_5", "imoex_ret_20", "sber_vs_imoex_5",
+        "key_rate_chg", "rate_rising",
+    ]
+    FEATURES = [c for c in FEATURES if c in feat.columns]
+    print("\nSELECTED FEATURES:")
+    print(FEATURES)
+
+    print(f"Признаков используется: {len(FEATURES)}")
+    print(FEATURES)
+
+    train_idx, val_idx, test_idx = time_splits(feat, CFG["TRAIN_FRAC"], CFG["VAL_FRAC"])
+
+    scaler = RobustScaler()
+    X_all_2d = feat[FEATURES].values
+    y_all = feat["Target"].values.astype(int)
+    dates_all = feat.index.values
+    future_ret_all = feat["future_ret"].values.astype(float)
+
+    X_train_raw_2d = feat.loc[train_idx, FEATURES].values
+
+    CLIP_Q = 0.005  # 0.5% / 99.5%
+    lo = np.nanquantile(X_train_raw_2d, CLIP_Q, axis=0)
+    hi = np.nanquantile(X_train_raw_2d, 1 - CLIP_Q, axis=0)
+
+    X_all_2d = np.clip(X_all_2d, lo, hi)
+
+    scaler.fit(np.clip(X_train_raw_2d, lo, hi))
+    X_all_scaled = scaler.transform(X_all_2d)
+
+    Xw, yw, dw = make_windows_aligned(X_all_scaled, y_all, dates_all, CFG["WINDOW"])
+    future_ret_w = future_ret_all[CFG["WINDOW"] - 1 :]
+
+    train_mask = np.isin(dw, train_idx.values)
+    val_mask = np.isin(dw, val_idx.values)
+    test_mask = np.isin(dw, test_idx.values)
+
+    X_train, y_train = Xw[train_mask], yw[train_mask]
+    X_val, y_val = Xw[val_mask], yw[val_mask]
+    X_test, y_test = Xw[test_mask], yw[test_mask]
+
+    fret_val = future_ret_w[val_mask]
+
+    print("\nWindows shapes:")
+    print("Train:", X_train.shape, "Val:", X_val.shape, "Test:", X_test.shape)
+
+    classes = np.array([0, 1])
+    cw = compute_class_weight("balanced", classes=classes, y=y_train)
+    class_weight = {0: float(cw[0]), 1: float(cw[1])}
+    print("class_weight:", class_weight)
+
+    model = build_tcn_model(CFG["WINDOW"], X_train.shape[2], CFG["LR"])
+    if SHOW_MODEL_SUMMARY:
+        model.summary()
+
+    class ShortMetrics(tf.keras.callbacks.Callback):
+        def __init__(self, every=5):
+            super().__init__()
+            self.every = every
+
+        def on_epoch_end(self, epoch, logs=None):
+            logs = logs or {}
+            ep = epoch + 1
+            if ep == 1 or ep % self.every == 0:
+                print(
+                    f"ep={ep:03d} "
+                    f"loss={logs.get('loss', np.nan):.4f} "
+                    f"val_loss={logs.get('val_loss', np.nan):.4f} "
+                    f"val_auc_pr={logs.get('val_auc_pr', np.nan):.4f} "
+                    f"val_auc_roc={logs.get('val_auc_roc', np.nan):.4f}"
+                )
+
+
+    callbacks = [
+
+        tf.keras.callbacks.EarlyStopping(
+            monitor="val_auc_pr",
+            mode="max",
+            patience=CFG["PATIENCE"],
+            restore_best_weights=True,
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_auc_pr",
+            mode="max",
+            factor=0.5,
+            patience=5,
+            min_lr=1e-5,
+        ),
+        tf.keras.callbacks.ModelCheckpoint(
+            filepath="tcn_best.weights.h5",
+            monitor="val_auc_pr",
+            mode="max",
+            save_best_only=True,
+            save_weights_only=True,
+            verbose=0,
+        ),
+    ]
+
+
+    history = model.fit(
+        X_train,
+        y_train,
+        validation_data=(X_val, y_val),
+        epochs=CFG["EPOCHS"],
+        batch_size=CFG["BATCH"],
+        class_weight=class_weight,
+        shuffle=False,
+        callbacks=callbacks,
+        verbose=FIT_VERBOSE,
+    )
+
+    # Load best weights by VAL PR-AUC (stabilize across restarts)
+    if os.path.exists("tcn_best.weights.h5"):
+        model.load_weights("tcn_best.weights.h5")
+
+    prob_val = model.predict(X_val, verbose=0).reshape(-1)
+    prob_test = model.predict(X_test, verbose=0).reshape(-1)
+    prob_train = model.predict(X_train, verbose=0).reshape(-1)
+
+    # Orientation calibration on the last part of VAL (no TEST leakage)
+    N_CAL = min(120, len(y_val))
+    auc_tail = roc_auc_score(y_val[-N_CAL:], prob_val[-N_CAL:]) if len(np.unique(y_val[-N_CAL:])) > 1 else 0.5
+    auc_tail_inv = roc_auc_score(y_val[-N_CAL:], 1 - prob_val[-N_CAL:]) if len(np.unique(y_val[-N_CAL:])) > 1 else 0.5
+
+    FLIP = auc_tail_inv > auc_tail
+    if SHOW_TRAIN_VAL_DIAG:
+        print("\n" + "=" * 70)
+        print(f"VAL tail AUC={auc_tail:.3f} | AUC(1-p)={auc_tail_inv:.3f} | FLIP={FLIP}")
+        print("=" * 70)
+
+    if FLIP:
+        prob_train = 1 - prob_train
+        prob_val = 1 - prob_val
+        prob_test = 1 - prob_test
+
+    # ---- Probabilities + probability quality ----
+    if SHOW_TRAIN_VAL_DIAG:
+        prob_summary("TRAIN", y_train, prob_train)
+        prob_summary("VAL", y_val, prob_val)
+    prob_summary("TEST", y_test, prob_test)
+
+    # ---- Threshold sweeps ----
+    if SHOW_TRAIN_VAL_DIAG:
+        sweep_val = threshold_sweep("VAL", y_val, prob_val)
+        sweep_test = threshold_sweep("TEST", y_test, prob_test)
+
+    # ---- Decile analysis (ranking) ----
+    fret_train = future_ret_w[train_mask]
+    fret_val = future_ret_w[val_mask]
+    fret_test = future_ret_w[test_mask]
+
+    if SHOW_TRAIN_VAL_DIAG:
+        decile_report("TRAIN", y_train, prob_train, fret_train)
+        decile_report("VAL", y_val, prob_val, fret_val)
+    decile_report("TEST", y_test, prob_test, fret_test)
+
+    # ---- Feature drift (PSI) ----
+    # Quick indicator: use the last timestep of each window
+    X_train_last = X_train[:, -1, :]
+    X_test_last = X_test[:, -1, :]
+    drift_report_features(X_train_last, X_test_last, FEATURES, top_k=12)
+
+    # ---- Probability drift ----
+    p_psi = psi_1d(prob_train, prob_test, n_bins=10)
+    print("\n" + "=" * 70)
+    print(f"PROB DRIFT PSI(train→test): {p_psi:.3f} (if >0.25 — strong shift)")
+    print("=" * 70)
+
+    thr_f1, thr_pnl, thr_table = pick_threshold_on_val(y_val, prob_val, fret_val, CFG["HORIZON"], CFG["FEE"])
+
+    print(f"\nChosen threshold (VAL max F1(BUY)): {thr_f1:.2f}")
+    print(f"Chosen threshold (VAL max avg PnL): {thr_pnl:.2f}")
+
+    # ----------------------------
+    # COMPACT DASHBOARD (single block)
+    # ----------------------------
+    _hist = history_summary(history)
+    _test = compact_prob_metrics(y_test, prob_test)
+    _dec = make_decile_table(y_test, prob_test, future_ret=fret_test, n_bins=10)
+
+    # decile spread: top vs bottom buy-rate
+    if len(_dec) >= 2:
+        _dec_spread = float(_dec.loc[_dec["decile"].max(), "buy_rate"] - _dec.loc[_dec["decile"].min(), "buy_rate"])
+    else:
+        _dec_spread = float("nan")
+
+    # Prepare backtest inputs (re-used below)
+    _dates_test = dw[test_mask]
+    _close_full = sber["Close"]
+
+    _bt_f1 = backtest_nonoverlap_long_only_stats(prob_test, _dates_test, _close_full, thr_f1, CFG["HORIZON"], CFG["FEE"])
+    _bt_pnl = backtest_nonoverlap_long_only_stats(prob_test, _dates_test, _close_full, thr_pnl, CFG["HORIZON"], CFG["FEE"])
 
     print("\n" + "=" * 70)
-    print(f"BACKTEST (Close, non-overlap) | thr={thr:.2f} horizon={horizon} fee={fee:.2%}")
+    print("=== COMPACT DASHBOARD ===")
     print("=" * 70)
-    print(f"Strategy return: {strat_ret:+.2%}")
-    print(f"Buy&Hold return: {bh_ret:+.2%}")
-    print(f"Alpha: {(strat_ret - bh_ret):+.2%}")
-    print(f"Trades: {n_trades} | WinRate: {winrate:.1%}")
+    print(
+        "HISTORY | "
+        f"epochs_run={_hist['epochs_run']} "
+        f"best_epoch={_hist['best_epoch']} "
+        f"best_val_auc_pr={_hist['best_val_auc_pr']:.4f} "
+        f"best_val_auc_roc={_hist['best_val_auc_roc']:.4f} "
+        f"best_val_loss={_hist['best_val_loss']:.4f}"
+    )
 
-    return strat_ret, bh_ret, n_trades, winrate
+    print(
+        "TEST | "
+        f"roc_auc={_test['roc_auc']:.4f} pr_auc={_test['pr_auc']:.4f} pr_lift={_test['pr_auc_lift']:.4f} | "
+        f"logloss={_test['logloss']:.4f} (gain_vs_base={_test['logloss_gain_vs_baseline']:+.4f}) | "
+        f"ece10={_test['ece10']:.4f} | prob_mean={_test['prob_mean']:.4f}±{_test['prob_std']:.4f} | "
+        f"prob_psi(train→test)={p_psi:.3f}"
+    )
+
+    inv = bool(_test["roc_auc_inv"] > _test["roc_auc"])
+    print(f"inverted_signal={inv} (roc_auc(1-p)={_test['roc_auc_inv']:.4f})")
+    print(f"decile_spread(buy_rate top-bottom)={_dec_spread:+.4f}")
+    print("deciles (TEST):")
+    print(_dec.to_string(index=False))
+
+    print("\nBACKTEST TEST (non-overlap, Close):")
+    print(
+        f"thr_f1={thr_f1:.2f} | strat={_bt_f1['strategy_return']:+.2%} "
+        f"bh={_bt_f1['buyhold_return']:+.2%} alpha={_bt_f1['alpha']:+.2%} "
+        f"trades={_bt_f1['n_trades']} win={_bt_f1['winrate']:.1%}"
+    )
+    print(
+        f"thr_pnl={thr_pnl:.2f} | strat={_bt_pnl['strategy_return']:+.2%} "
+        f"bh={_bt_pnl['buyhold_return']:+.2%} alpha={_bt_pnl['alpha']:+.2%} "
+        f"trades={_bt_pnl['n_trades']} win={_bt_pnl['winrate']:.1%}"
+    )
+    print("=" * 70)
 
 
-# test window end dates
-_dates_test = dw[test_mask]
-_close_full = sber["Close"]
 
-backtest_nonoverlap_long_only(prob_test, _dates_test, _close_full, thr_f1, CFG["HORIZON"], CFG["FEE"])
-if abs(thr_pnl - thr_f1) > 1e-12:
-    backtest_nonoverlap_long_only(prob_test, _dates_test, _close_full, thr_pnl, CFG["HORIZON"], CFG["FEE"])
 
-model.save("tcn_ru_model.keras")
-with open("tcn_ru_scaler.pkl", "wb") as f:
-    pickle.dump(scaler, f)
 
-print("\nSaved: tcn_ru_model.keras and tcn_ru_scaler.pkl")
+
+    def backtest_nonoverlap_long_only(prob, dates_signal, close_full, thr, horizon, fee):
+        dates = pd.to_datetime(dates_signal)
+        close_full = close_full.copy()
+        close_full.index = pd.to_datetime(close_full.index)
+
+        # Buy&Hold on the same segment
+        start_date = dates[0]
+        last_date = dates[-1]
+        try:
+            last_loc = close_full.index.get_loc(last_date)
+            end_loc = min(last_loc + horizon, len(close_full.index) - 1)
+            end_date = close_full.index[end_loc]
+        except KeyError:
+            end_date = close_full.index[-1]
+
+        bh_ret = float(close_full.loc[end_date] / close_full.loc[start_date] - 1.0)
+
+        eq = 1.0
+        trades = []
+        i = 0
+        while i < len(prob):
+            if prob[i] >= thr:
+                d0 = dates[i]
+                try:
+                    loc0 = close_full.index.get_loc(d0)
+                except KeyError:
+                    i += 1
+                    continue
+
+                loc1 = loc0 + horizon
+                if loc1 >= len(close_full.index):
+                    break
+
+                entry = float(close_full.iloc[loc0])
+                exitp = float(close_full.iloc[loc1])
+                ret = exitp / entry - 1.0 - fee
+
+                eq *= (1.0 + ret)
+                trades.append(ret)
+                i += horizon
+            else:
+                i += 1
+
+        strat_ret = float(eq - 1.0)
+        n_trades = int(len(trades))
+        winrate = float(np.mean(np.array(trades) > 0)) if n_trades else 0.0
+
+        print("\n" + "=" * 70)
+        print(f"BACKTEST (Close, non-overlap) | thr={thr:.2f} horizon={horizon} fee={fee:.2%}")
+        print("=" * 70)
+        print(f"Strategy return: {strat_ret:+.2%}")
+        print(f"Buy&Hold return: {bh_ret:+.2%}")
+        print(f"Alpha: {(strat_ret - bh_ret):+.2%}")
+        print(f"Trades: {n_trades} | WinRate: {winrate:.1%}")
+
+        return strat_ret, bh_ret, n_trades, winrate
+
+
+    # test window end dates
+    _dates_test = dw[test_mask]
+    _close_full = sber["Close"]
+
+    backtest_nonoverlap_long_only(prob_test, _dates_test, _close_full, thr_f1, CFG["HORIZON"], CFG["FEE"])
+    if abs(thr_pnl - thr_f1) > 1e-12:
+        backtest_nonoverlap_long_only(prob_test, _dates_test, _close_full, thr_pnl, CFG["HORIZON"], CFG["FEE"])
+
+    # Save artifacts only for single-run mode (avoid overwriting during multi-seed)
+    if len(CFG.get("RUN_SEEDS", [])) <= 1:
+        model.save("tcn_ru_model.keras")
+        with open("tcn_ru_scaler.pkl", "wb") as f:
+            pickle.dump(scaler, f)
+        print("\nSaved: tcn_ru_model.keras and tcn_ru_scaler.pkl")
+
+
+    # ----------------------------
+    # MULTI-SEED METRICS
+    # ----------------------------
+    pos_rate = float(y_test.mean())
+    roc_auc = float(roc_auc_score(y_test, prob_test)) if len(np.unique(y_test)) > 1 else float("nan")
+    pr_auc = float(average_precision_score(y_test, prob_test)) if len(np.unique(y_test)) > 1 else float("nan")
+
+    prob_clip = np.clip(prob_test, 1e-6, 1 - 1e-6)
+    ll = float(log_loss(y_test, prob_clip))
+    base_prob = np.full_like(prob_clip, fill_value=pos_rate, dtype=float)
+    ll_base = float(log_loss(y_test, np.clip(base_prob, 1e-6, 1 - 1e-6)))
+    logloss_gain_vs_baseline = float(ll_base - ll)
+
+    # alpha@thr_pnl (quiet compute, non-overlap)
+    def _alpha_nonoverlap(prob: np.ndarray, dates_signal: np.ndarray, close_full: pd.Series, thr: float, horizon: int, fee: float) -> float:
+        dates = pd.to_datetime(dates_signal)
+        close_full2 = close_full.copy()
+        close_full2.index = pd.to_datetime(close_full2.index)
+
+        start_date = dates[0]
+        last_date = dates[-1]
+        try:
+            last_loc = close_full2.index.get_loc(last_date)
+            end_loc = min(int(last_loc) + int(horizon), len(close_full2.index) - 1)
+            end_date = close_full2.index[end_loc]
+        except Exception:
+            end_date = close_full2.index[-1]
+
+        bh_ret = float(close_full2.loc[end_date] / close_full2.loc[start_date] - 1.0)
+
+        eq = 1.0
+        i = 0
+        while i < len(prob):
+            if prob[i] >= thr:
+                d0 = dates[i]
+                try:
+                    loc0 = close_full2.index.get_loc(d0)
+                except KeyError:
+                    i += 1
+                    continue
+                loc1 = int(loc0) + int(horizon)
+                if loc1 >= len(close_full2.index):
+                    break
+                entry = float(close_full2.iloc[int(loc0)])
+                exitp = float(close_full2.iloc[int(loc1)])
+                ret = exitp / entry - 1.0 - float(fee)
+                eq *= (1.0 + ret)
+                i += int(horizon)
+            else:
+                i += 1
+
+        strat_ret = float(eq - 1.0)
+        return float(strat_ret - bh_ret)
+
+    alpha_thr_pnl = _alpha_nonoverlap(prob_test, _dates_test, _close_full, float(thr_pnl), int(CFG["HORIZON"]), float(CFG["FEE"]))
+
+    return {
+        "seed": int(run_seed),
+        "roc_auc": roc_auc,
+        "pr_auc": pr_auc,
+        "logloss_gain_vs_baseline": logloss_gain_vs_baseline,
+        "prob_psi": float(p_psi),
+        "alpha_thr_pnl": float(alpha_thr_pnl),
+    }
+
+
+if __name__ == "__main__":
+    # Multi-seed evaluation
+    results = []
+    for i, sd in enumerate(CFG.get("RUN_SEEDS", [42])):
+        res = run_once(int(sd))
+        results.append(res)
+        print(f"Seed {sd}: roc_auc={res['roc_auc']:.3f} pr_auc={res['pr_auc']:.3f} ll_gain={res['logloss_gain_vs_baseline']:+.4f} psi={res['prob_psi']:.3f} alpha@thr_pnl={res['alpha_thr_pnl']:+.2%}")
+
+    df = pd.DataFrame(results)
+    print("\n=== MULTI-SEED SUMMARY ===")
+    with pd.option_context('display.max_columns', 50):
+        print(df.to_string(index=False))
+        print("\nDescribe:")
+        print(df.describe(include='all').to_string())

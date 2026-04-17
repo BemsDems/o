@@ -42,11 +42,13 @@ from sklearn.metrics import (
     confusion_matrix,
     f1_score,
     matthews_corrcoef,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
     roc_auc_score,
 )
 from sklearn.preprocessing import RobustScaler
 from sklearn.utils.class_weight import compute_class_weight
-from sklearn.metrics import precision_recall_curve
 
 
 # ==============================

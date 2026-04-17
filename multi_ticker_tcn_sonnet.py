@@ -111,29 +111,73 @@ def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return 100.0 - (100.0 / (1.0 + rs))
 
 
-def build_features_one(df: pd.DataFrame) -> pd.DataFrame:
+def build_features_one(df: pd.DataFrame, *, secid: str = "") -> pd.DataFrame:
+    """Feature engineering with minimal data loss.
+
+    Key idea: do NOT drop rows because of long-window indicators (e.g., SMA_200).
+    We drop NaNs only for "critical" short-window features needed downstream.
+    """
     out = df.copy()
 
-    # Log-returns
-    for lag in (1, 2, 3, 5):
+    n0 = len(out)
+    if secid:
+        print(f"  candles: {n0}")
+
+    # Log-returns (lags kept small to reduce NaN loss)
+    for lag in (1, 2, 3, 5, 10):
         out[f"logret_{lag}"] = np.log(out["CLOSE"] / out["CLOSE"].shift(lag))
 
-    # Trend
+    # Trend: short + long
+    out["sma_20"] = out["CLOSE"].rolling(20).mean()
+    out["sma_50"] = out["CLOSE"].rolling(50).mean()
     out["sma_200"] = out["CLOSE"].rolling(200).mean()
+    out["trend_up_20"] = (out["CLOSE"] > out["sma_20"]).astype(int)
+    out["trend_up_50"] = (out["CLOSE"] > out["sma_50"]).astype(int)
     out["trend_up_200"] = (out["CLOSE"] > out["sma_200"]).astype(int)
 
     # Relative volume
-    out["vol_rel"] = out["VOLUME"] / (out["VOLUME"].rolling(20).mean() + 1e-9)
+    out["vol_ma_20"] = out["VOLUME"].rolling(20).mean()
+    out["vol_rel"] = out["VOLUME"] / (out["vol_ma_20"] + 1e-9)
+    out["vol_spike"] = (out["vol_rel"] > 2.0).astype(int)
 
     # RSI
     out["rsi_14"] = compute_rsi(out["CLOSE"], 14)
+    out["rsi_oversold"] = (out["rsi_14"] < 30).astype(int)
+    out["rsi_overbought"] = (out["rsi_14"] > 70).astype(int)
 
     # 20d price position
     high_20 = out["HIGH"].rolling(20).max()
     low_20 = out["LOW"].rolling(20).min()
     out["price_pos_20"] = (out["CLOSE"] - low_20) / ((high_20 - low_20) + 1e-9)
 
-    out = out.dropna().copy()
+    # Volatility proxy
+    out["volatility_20"] = out["logret_1"].rolling(20).std()
+
+    # Diagnostics before drop
+    if secid:
+        print(f"  after indicators: {len(out)}")
+        print(f"  NaN sma_200: {int(out['sma_200'].isna().sum())}")
+
+    # Drop NaNs only for short-window features
+    critical_cols = [
+        "logret_1",
+        "logret_10",
+        "sma_20",
+        "vol_ma_20",
+        "rsi_14",
+        "price_pos_20",
+    ]
+    out = out.dropna(subset=critical_cols).copy()
+
+    # Fill long-window indicators (past-only)
+    out["sma_200"] = out["sma_200"].ffill()
+    out["trend_up_200"] = out["trend_up_200"].fillna(0).astype(int)
+
+    if secid:
+        n1 = len(out)
+        share = (n1 / n0 * 100.0) if n0 else 0.0
+        print(f"  after dropna(critical): {n1} ({share:.1f}%)")
+
     return out
 
 
@@ -158,17 +202,26 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
     for secid in CFG["TICKERS"]:
         print(f"Loading {secid}...")
         df = fetch_moex_candles(secid, str(CFG["START"]), CFG["END"])
+        print(f"  loaded rows: {len(df)}")
         if df.empty:
             print(f"  -> empty, skip")
             continue
 
-        df_feat = build_features_one(df)
+        df_feat = build_features_one(df, secid=secid)
+
+        min_rows = max(250, int(CFG["SEQ_LEN"]) + int(CFG["HORIZON"]) + 50)
+        if len(df_feat) < min_rows:
+            print(f"  -> too few rows after features ({len(df_feat)} < {min_rows}), skip")
+            continue
+
         y, fwd_ret = make_target(df_feat["CLOSE"], int(CFG["HORIZON"]), float(CFG["THR_MOVE"]))
 
         h = int(CFG["HORIZON"])
         df_feat = df_feat.iloc[:-h]
         y = y.iloc[:-h]
         fwd_ret = fwd_ret.iloc[:-h]
+
+        print(f"  final rows (after horizon trim): {len(df_feat)}")
 
         tmp = df_feat.copy()
         tmp["target"] = y.values
@@ -182,14 +235,21 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
     full = pd.concat(rows, axis=0).sort_values(["date", "secid"]).reset_index(drop=True)
 
     feature_cols = [
-        "trend_up_200",
         "logret_1",
         "logret_2",
         "logret_3",
         "logret_5",
+        "logret_10",
+        "trend_up_20",
+        "trend_up_50",
+        "trend_up_200",
         "vol_rel",
+        "vol_spike",
         "rsi_14",
+        "rsi_oversold",
+        "rsi_overbought",
         "price_pos_20",
+        "volatility_20",
     ]
     feature_cols = [c for c in feature_cols if c in full.columns]
 

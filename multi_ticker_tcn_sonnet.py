@@ -46,6 +46,9 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import RobustScaler
 from sklearn.utils.class_weight import compute_class_weight
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import precision_recall_curve
+from sklearn.base import BaseEstimator, ClassifierMixin
 
 
 # ==============================
@@ -469,41 +472,58 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
 # ==============================
 
 
-def time_split_masks(dates: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Разбиение по уникальным датам (без утечки будущего).
+def time_split_masks(dates: np.ndarray, secids: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-ticker time split (prevents one ticker dominating / YNDX issues).
 
-    moexalgo/feature filtering может привести к пустым данным — в этом случае
-    кидаем понятную ошибку вместо IndexError.
+    For each ticker independently: sort by date, then split by fractions.
+    Returns row-level boolean masks aligned with input arrays.
     """
-    uniq = np.unique(dates)
 
-    # guard: no dates -> nothing to split
-    if len(uniq) == 0:
-        raise ValueError("Нет данных для разбиения! Проверьте загрузку тикеров.")
+    n = len(dates)
+    train_mask = np.zeros(n, dtype=bool)
+    val_mask = np.zeros(n, dtype=bool)
+    test_mask = np.zeros(n, dtype=bool)
 
-    uniq = np.sort(uniq)
-    n = int(len(uniq))
+    for secid in np.unique(secids):
+        sec_mask = secids == secid
+        sec_dates = dates[sec_mask]
+        sec_indices = np.where(sec_mask)[0]
+        if len(sec_dates) == 0:
+            continue
 
-    n_train = int(n * float(CFG["TRAIN_SPLIT"]))
-    n_val = int(n * float(CFG["VAL_SPLIT"]))
+        order = np.argsort(sec_dates)
+        sorted_indices = sec_indices[order]
 
-    # граничные условия
-    if n_train == 0:
-        n_train = 1
-    if n_val == 0:
-        n_val = 1
-    if n_train + n_val >= n:
-        n_train = max(1, n - 2)
-        n_val = 1
+        n_sec = int(len(sorted_indices))
+        n_train = int(n_sec * float(CFG["TRAIN_SPLIT"]))
+        n_val = int(n_sec * float(CFG["VAL_SPLIT"]))
 
-    train_end = uniq[n_train - 1]
-    val_end = uniq[min(n_train + n_val - 1, n - 1)]
+        # guardrails
+        if n_train <= 0:
+            n_train = 1
+        if n_val <= 0:
+            n_val = 1
+        if n_train + n_val >= n_sec:
+            n_train = max(1, n_sec - 2)
+            n_val = 1
 
-    train_mask = dates <= train_end
-    val_mask = (dates > train_end) & (dates <= val_end)
-    test_mask = dates > val_end
+        train_end = n_train
+        val_end = n_train + n_val
+
+        train_mask[sorted_indices[:train_end]] = True
+        val_mask[sorted_indices[train_end:val_end]] = True
+        test_mask[sorted_indices[val_end:]] = True
+
+    print("\n=== SPLIT DISTRIBUTION BY TICKER ===")
+    for secid in np.unique(secids):
+        sec_mask = secids == secid
+        n_tr = int((train_mask & sec_mask).sum())
+        n_va = int((val_mask & sec_mask).sum())
+        n_te = int((test_mask & sec_mask).sum())
+        print(f"{str(secid):4s}: Train={n_tr:4d}, Val={n_va:4d}, Test={n_te:4d}")
 
     return train_mask, val_mask, test_mask
+
 
 
 def _safe_auc(y_true: np.ndarray, y_prob: np.ndarray) -> float:
@@ -540,56 +560,78 @@ def per_ticker_metrics(y_true: np.ndarray, y_prob: np.ndarray, secids: np.ndarra
     return pd.DataFrame(rows).sort_values("secid")
 
 
-def simple_backtest_nonoverlap_longonly(
+def improved_backtest_per_ticker(
     y_prob: np.ndarray,
     fwd_ret: np.ndarray,
     dates: np.ndarray,
     secids: np.ndarray,
-    thr: float,
+    threshold: float,
     fee: float,
 ) -> pd.DataFrame:
-    # For each ticker separately: take signal days (prob>=thr), then skip next horizon days (non-overlap)
-    # Here we approximate by sorting by date and greedy selection.
-    res_rows = []
-    horizon = int(CFG["HORIZON"])
+    """Backtest per ticker with 2 policies:
 
-    for s in sorted(set(secids)):
-        m = secids == s
-        if m.sum() == 0:
+    1) Fixed threshold
+    2) Top-20% confidence (dynamic threshold)
+
+    Uses non-overlapping trades with horizon=CFG["HORIZON"].
+    Fee is applied as 2*fee (entry+exit) to be more conservative.
+    """
+
+    horizon = int(CFG["HORIZON"])
+    results = []
+
+    for secid in sorted(set(secids)):
+        mask = secids == secid
+        if int(mask.sum()) < 50:
             continue
 
-        d = pd.to_datetime(dates[m])
-        p = y_prob[m]
-        r = fwd_ret[m]
+        prob_sec = y_prob[mask]
+        ret_sec = fwd_ret[mask]
+        dates_sec = dates[mask]
 
-        order = np.argsort(d.values)
-        d = d.values[order]
-        p = p[order]
-        r = r[order]
+        order = np.argsort(dates_sec)
+        prob_sec = prob_sec[order]
+        ret_sec = ret_sec[order]
 
-        picks = []
+        # fixed threshold trades
+        trades_fixed = []
         i = 0
-        while i < len(d):
-            if p[i] >= thr:
-                net = float(r[i]) - float(fee)
-                picks.append(net)
+        while i < len(prob_sec):
+            if prob_sec[i] >= threshold:
+                net = float(ret_sec[i]) - 2.0 * float(fee)
+                trades_fixed.append(net)
                 i += horizon
             else:
                 i += 1
 
-        if picks:
-            res_rows.append(
-                {
-                    "secid": s,
-                    "n_trades": int(len(picks)),
-                    "mean_net": float(np.mean(picks)),
-                    "sum_net": float(np.sum(picks)),
-                }
-            )
-        else:
-            res_rows.append({"secid": s, "n_trades": 0, "mean_net": float("nan"), "sum_net": 0.0})
+        # top-20% confidence trades
+        top20_thr = float(np.percentile(prob_sec, 80))
+        trades_top20 = []
+        i = 0
+        while i < len(prob_sec):
+            if prob_sec[i] >= top20_thr:
+                net = float(ret_sec[i]) - 2.0 * float(fee)
+                trades_top20.append(net)
+                i += horizon
+            else:
+                i += 1
 
-    return pd.DataFrame(res_rows).sort_values("secid")
+        results.append(
+            {
+                "secid": str(secid),
+                "n_signals": int((prob_sec >= threshold).sum()),
+                "n_trades_fixed": int(len(trades_fixed)),
+                "mean_ret_fixed": float(np.mean(trades_fixed)) if trades_fixed else 0.0,
+                "total_ret_fixed": float(np.sum(trades_fixed)) if trades_fixed else 0.0,
+                "n_trades_top20": int(len(trades_top20)),
+                "mean_ret_top20": float(np.mean(trades_top20)) if trades_top20 else 0.0,
+                "total_ret_top20": float(np.sum(trades_top20)) if trades_top20 else 0.0,
+                "sharpe_fixed": float(np.mean(trades_fixed) / (np.std(trades_fixed) + 1e-9)) if len(trades_fixed) > 1 else 0.0,
+            }
+        )
+
+    return pd.DataFrame(results)
+
 
 
 # ==============================
@@ -822,7 +864,7 @@ def main() -> None:
 
 
     # Split by dates on ROWS (not windows), then build sequences per ticker within each split
-    m_train_rows, m_val_rows, m_test_rows = time_split_masks(ds.dates)
+    m_train_rows, m_val_rows, m_test_rows = time_split_masks(ds.dates, ds.secids)
 
     (
         X_train, y_train, _, _, _,
@@ -931,7 +973,64 @@ def main() -> None:
         verbose=2,
     )
 
-    y_prob = model.predict(X_test, batch_size=int(CFG["BATCH_SIZE"])).ravel()
+
+
+    # ==============================
+    # CALIBRATION (Platt scaling) on VAL
+    # ==============================
+    class KerasClassifierWrapper(BaseEstimator, ClassifierMixin):
+        def __init__(self, model):
+            self.model = model
+
+        def fit(self, X, y):
+            return self
+
+        def predict_proba(self, X):
+            prob = self.model.predict(X, verbose=0).ravel()
+            prob = np.clip(prob, 1e-6, 1 - 1e-6)
+            return np.column_stack([1 - prob, prob])
+
+    print("\n=== CALIBRATING MODEL ===")
+    wrapped_model = KerasClassifierWrapper(model)
+    calibrator = CalibratedClassifierCV(wrapped_model, method="sigmoid", cv="prefit")
+    calibrator.fit(X_val, y_val)
+
+    # ==============================
+    # THRESHOLD OPTIMIZATION (precision target) on VAL
+    # ==============================
+    print("\n=== THRESHOLD OPTIMIZATION ===")
+    val_prob_cal = calibrator.predict_proba(X_val)[:, 1]
+    precision, recall, thresholds = precision_recall_curve(y_val, val_prob_cal)
+
+    target_precision = 0.30
+    mask = precision >= target_precision
+    if mask.any() and len(thresholds) > 0:
+        idx = np.where(mask)[0][-1]
+        idx = min(idx, len(thresholds) - 1)
+        best_thr = float(thresholds[idx])
+        best_precision = float(precision[idx])
+        best_recall = float(recall[idx])
+    else:
+        f1_scores = 2 * (precision * recall) / (precision + recall + 1e-10)
+        idx = int(np.argmax(f1_scores))
+        best_thr = float(thresholds[idx]) if idx < len(thresholds) else 0.5
+        best_precision = float(precision[idx])
+        best_recall = float(recall[idx])
+
+    best_f1 = float(2 * best_precision * best_recall / (best_precision + best_recall + 1e-12))
+    print(f"Optimized threshold: {best_thr:.3f}")
+    print(f" Precision: {best_precision:.3f}")
+    print(f" Recall: {best_recall:.3f}")
+    print(f" F1: {best_f1:.3f}")
+
+    # Predict (raw + calibrated)
+    y_prob_raw = model.predict(X_test, verbose=0).ravel()
+    y_prob = calibrator.predict_proba(X_test)[:, 1]
+
+    print(f"Before calibration: mean={float(y_prob_raw.mean()):.3f}")
+    print(f"After calibration:  mean={float(y_prob.mean()):.3f}")
+    print(f"True positive rate: {float(y_test.mean()):.3f}")
+
 
     # Prediction sanity check
     if np.isnan(y_prob).any():
@@ -960,7 +1059,7 @@ def main() -> None:
 
 
     print("\n=== GLOBAL TEST METRICS ===")
-    g = evaluate_global(y_test, y_prob, thr=0.5)
+    g = evaluate_global(y_test, y_prob, thr=best_thr)
     for k, v in g.items():
         print(f"{k}: {v:.6f}" if isinstance(v, float) else f"{k}: {v}")
 
@@ -971,13 +1070,13 @@ def main() -> None:
     s = pd.Series(y_prob)
     print(s.describe(percentiles=[0.01, 0.05, 0.1, 0.5, 0.9, 0.95, 0.99]).to_string())
 
-    print("\n=== BACKTEST (non-overlap long-only, TEST) ===")
-    bt = simple_backtest_nonoverlap_longonly(
+    print("\n=== IMPROVED BACKTEST (TEST) ===")
+    bt = improved_backtest_per_ticker(
         y_prob=y_prob,
         fwd_ret=fwd_test,
         dates=dates_test,
         secids=secids_test,
-        thr=0.5,
+        threshold=best_thr,
         fee=float(CFG["FEE"]),
     )
     print(bt.to_string(index=False))

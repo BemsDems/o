@@ -166,6 +166,8 @@ def build_features_one(df: pd.DataFrame, *, secid: str = "") -> pd.DataFrame:
         print(f"  NaN sma_200: {int(out['sma_200'].isna().sum())}")
 
     # Drop NaNs only for short-window features
+    out = out.replace([np.inf, -np.inf], np.nan)
+
     critical_cols = [
         "logret_1",
         "logret_10",
@@ -428,7 +430,7 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
     )
     model.compile(
         optimizer=opt,
-        loss="binary_crossentropy",
+        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.0),
         metrics=[tf.keras.metrics.AUC(name="auc")],
     )
     return model
@@ -661,6 +663,13 @@ def main() -> None:
     )
 
     y_prob = model.predict(X_test, batch_size=int(CFG["BATCH_SIZE"])).ravel()
+
+    # Prediction sanity check
+    if np.isnan(y_prob).any():
+        print("\nWARNING: NaN in predictions — model likely failed to train")
+        print(f"Train X NaN: {np.isnan(X_train).any()}, Inf: {np.isinf(X_train).any()}")
+        return
+
 
     print("\n=== GLOBAL TEST METRICS ===")
     g = evaluate_global(y_test, y_prob, thr=0.5)

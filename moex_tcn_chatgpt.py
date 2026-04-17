@@ -101,6 +101,60 @@ set_global_seed(42)
 
 
 
+# HOW TO USE (Fundamentals scaffold)
+#
+# 1) Quick start via Smart-Lab fallback (no e-disclosure token needed):
+#
+#   ticker = "SBER"
+#
+#   smartlab_msfo = fetch_smartlab_financials(ticker=ticker, report_type="MSFO", freq="q")
+#   smartlab_rsbu = fetch_smartlab_financials(ticker=ticker, report_type="RSBU", freq="q")
+#
+#   fund = combine_fundamental_sources(
+#       normalize_fundamentals(smartlab_msfo),
+#       normalize_fundamentals(smartlab_rsbu),
+#   )
+#
+#   print(fund.head())
+#   print(fund.tail())
+#
+# 2) If you have an e-disclosure token:
+#
+#   client = EDisclosureClient(
+#       token=CFG_FUND.edisclosure_token,
+#       base_url=CFG_FUND.edisclosure_base,
+#       timeout=CFG_FUND.request_timeout,
+#       user_agent=CFG_FUND.user_agent,
+#   )
+#
+#   # disclosures = client.search_disclosures("SBER", "2019-01-01", "2025-12-31")
+#   # print(disclosures.head())
+#
+# 3) How to plug into the current pipeline (no leakage):
+#    After candles load and BEFORE add_target(...):
+#
+#   fund_msfo = fetch_smartlab_financials(CFG["TICKER"], report_type="MSFO", freq="q")
+#   fund_rsbu = fetch_smartlab_financials(CFG["TICKER"], report_type="RSBU", freq="q")
+#   fund = combine_fundamental_sources(
+#       normalize_fundamentals(fund_msfo),
+#       normalize_fundamentals(fund_rsbu),
+#   )
+#
+#   feat = build_features(sber, usd, imo, key_rate, divs)
+#   feat = add_fundamental_features_past_only(feat, fund, ticker=CFG["TICKER"], lag_days=1)
+#   feat = add_target(feat, CFG["HORIZON"], CFG["THR_MOVE"])
+#
+#   FUND_FEATURES = [
+#       "revenue",
+#       "net_income",
+#       "eps",
+#       "roe",
+#       "pb_ratio",
+#       "net_margin",
+#       "value_quality",
+#   ]
+#   FEATURES = BASE_FEATURES + [c for c in FUND_FEATURES if c in feat.columns]
+#
 # ============================
 # FUNDAMENTALS (diploma scaffold)
 # ============================

@@ -350,6 +350,15 @@ def build_features(
         df["days_since_last_dividend"] = 9999
         df["last_div_yield_approx"] = 0.0
 
+    
+
+    # Soft dividend transforms (more stable than raw sparse dividend features)
+    # NOTE: uses only past-known information (already past-only merged in add_dividend_past_only_features).
+    df["days_since_last_dividend_capped"] = df["days_since_last_dividend"].clip(0, 365)
+    df["div_decay_90"] = np.exp(-df["days_since_last_dividend_capped"] / 90.0)
+    df["div_decay_180"] = np.exp(-df["days_since_last_dividend_capped"] / 180.0)
+    df["last_dividend_log"] = np.log1p(df["last_dividend"].clip(lower=0))
+    df["div_sum_365d_log"] = np.log1p(df["div_sum_365d"].clip(lower=0))
     df = df.dropna().copy()
     return df
 
@@ -879,8 +888,12 @@ FEATURES = [
 
     "key_rate_chg", "rate_rising",
 
-    # dividends (soft / safest)
+    # dividends (soft / stable)
     "div_paid_recent_30d",
+    "div_decay_90",
+    "div_decay_180",
+    "last_dividend_log",
+    "div_sum_365d_log",
 ]
 FEATURES = [c for c in FEATURES if c in feat.columns]
 print(f"Признаков используется: {len(FEATURES)}")

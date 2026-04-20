@@ -213,7 +213,15 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
         "price_pos_20",
         "volatility_20",
     ]
-    feature_cols = [c for c in feature_cols if c in full.columns]
+    # NOTE: do not silently drop features — it leads to confusing logs like
+    # "Features (9)" when you expected 15. If a feature is missing, fail fast.
+    missing = [c for c in feature_cols if c not in full.columns]
+    if missing:
+        raise RuntimeError(
+            "Missing expected feature columns. "
+            f"Expected={len(feature_cols)}, missing={missing}. "
+            "Check build_features_one() and upstream data columns."
+        )
 
     X = full[feature_cols].values
     y = full["target"].astype(int).values

@@ -20,11 +20,13 @@ CFG: Dict[str, Any] = {
     "EPOCHS": 100,
     "LR": 3e-4,
     "SEED": 42,
+    "N_RUNS": 3,
     "FEE": 0.001,
     "EXTENDED_DIAGNOSTICS": True,
 }
 
 
-def seed_everything() -> None:
-    np.random.seed(int(CFG["SEED"]))
-    tf.random.set_seed(int(CFG["SEED"]))
+def seed_everything(seed: int | None = None) -> None:
+    s = int(CFG["SEED"]) if seed is None else int(seed)
+    np.random.seed(s)
+    tf.random.set_seed(s)

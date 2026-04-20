@@ -49,7 +49,7 @@ CFG: Dict[str, Any] = {
     # Artifacts / experiment packaging
     "SAVE_RUN_ARTIFACTS": True,
     "SAVE_PER_SEED_TABLES": True,
-    "ARTIFACTS_DIR": "artifacts",
+    "ARTIFACTS_DIR": "/content/o/artifacts",
     "RUN_TAG": None,  # None => timestamp
 
     "AUTO_DOWNLOAD_ARTIFACTS": True,

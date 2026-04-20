@@ -10,6 +10,7 @@ experiment packaging (artifacts, logs, snapshots).
 from __future__ import annotations
 
 import contextlib
+import shutil
 import traceback
 from pathlib import Path
 
@@ -25,7 +26,6 @@ from src.config.settings import (
 from src.training.artifacts import (
     TeeStream,
     build_chat_report,
-    download_artifacts_if_needed,
     make_run_dir,
     save_json,
     save_prepared_snapshot,
@@ -127,11 +127,25 @@ if __name__ == "__main__":
                 print(run_dir / "multi_seed_aggregated.csv")
                 print(run_dir / "for_chat.txt")
 
-                downloaded_path = download_artifacts_if_needed(run_dir, CFG)
-                if downloaded_path is not None:
-                    print(f"Auto-downloaded: {downloaded_path}")
-
         except Exception:
             err = traceback.format_exc()
             write_text(run_dir / "error_log.txt", err)
             raise
+
+    # Download must run outside redirected stdout/stderr block (Colab quirk)
+    if CFG.get("AUTO_DOWNLOAD_ARTIFACTS", False):
+        try:
+            from google.colab import files
+
+            zip_path = shutil.make_archive(
+                str(run_dir),
+                "zip",
+                root_dir=run_dir.parent,
+                base_dir=run_dir.name,
+            )
+            print(f"ZIP created: {zip_path}")
+            files.download(zip_path)
+        except Exception as e:
+            err_msg = f"Auto-download failed: {type(e).__name__}: {e}"
+            print(err_msg)
+            write_text(run_dir / "download_error.txt", err_msg + "\n")

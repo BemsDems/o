@@ -1,7 +1,16 @@
 
-# chat gpt
-# Colab-ready: MOEX/CBR feature engineering + LSTM classifier (ChatGPT variant)
-# Goal: run end-to-end in one notebook/script.
+"""MOEX TCN baseline (ChatGPT variant).
+
+Colab-ready: MOEX/CBR feature engineering + TCN classifier (single-stock baseline)
+
+Current practical baseline:
+- single Russian stock
+- binary target
+- TCN
+- technical + market context + key rate
+- no fundamentals in final working version
+- dividends disabled in baseline (configurable)
+"""
 #
 # In Colab:
 # !pip -q install moexalgo requests pandas numpy scikit-learn tensorflow lxml html5lib keras-tcn
@@ -77,10 +86,23 @@ CFG = {
     # Feature clipping (robustness against outliers)
     "CLIP_Q": 0.005,
 
+    # Current practical baseline: no dividends
+    "USE_DIVIDENDS": False,
+
     # Save model/scaler only for single-seed runs
     "SAVE_SINGLE_RUN_ARTIFACTS": False,
 
 }
+
+
+BASE_FEATURES = [
+    "ret_1", "ret_2", "ret_5", "ret_10", "ret_20", "log_ret",
+    "dist_sma20", "dist_sma50", "trend_up_200", "rsi_14",
+    "vol_rel", "bb_width", "bb_pos", "vol_ratio_5_20", "vol_spike",
+    "imoex_ret_1", "imoex_ret_5", "imoex_ret_20",
+    "stock_vs_imoex_5",
+    "key_rate_chg", "rate_rising",
+]
 
 # ----------------------------
 # RUN FLAGS (to reduce output)
@@ -619,7 +641,7 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
 
 
 def add_dividend_past_only_features(df: pd.DataFrame, div: pd.DataFrame) -> pd.DataFrame:
-    """Non-leaky: only last known dividend and derived past-only features."""
+    """Non-leaky dividend features based only on already known past dividend events."""
     out = df.copy().sort_index()
 
     tmp = out.reset_index().rename(columns={out.index.name or out.reset_index().columns[0]: "date"})
@@ -638,51 +660,65 @@ def add_dividend_past_only_features(df: pd.DataFrame, div: pd.DataFrame) -> pd.D
 
     div2 = div.copy()
     div2["date"] = pd.to_datetime(div2["date"], errors="coerce")
-    div2 = div2.dropna().sort_values("date").reset_index(drop=True)
+    div2["dividend_rub"] = pd.to_numeric(div2["dividend_rub"], errors="coerce")
+    div2 = div2.dropna(subset=["date", "dividend_rub"]).sort_values("date").reset_index(drop=True)
 
-    # last known dividend
+    if div2.empty:
+        return tmp.set_index("date")
+
+    # growth of last dividend vs previous one
+    div2["prev_dividend"] = div2["dividend_rub"].shift(1)
+    div2["div_growth_last_tmp"] = div2["dividend_rub"] / div2["prev_dividend"].replace(0, np.nan) - 1.0
+    div2["div_growth_last_tmp"] = (
+        div2["div_growth_last_tmp"]
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0.0)
+    )
+
+    # merge last known dividend EVENT date, not just propagated dividend value
+    last_known = (
+        div2.rename(columns={"date": "last_div_date"})
+        [["last_div_date", "dividend_rub", "div_growth_last_tmp"]]
+        .sort_values("last_div_date")
+        .reset_index(drop=True)
+    )
+
     tmp = pd.merge_asof(
         tmp.sort_values("date"),
-        div2[["date", "dividend_rub"]].sort_values("date"),
-        on="date",
+        last_known,
+        left_on="date",
+        right_on="last_div_date",
         direction="backward",
     )
-    tmp["dividend_rub"] = tmp["dividend_rub"].fillna(0.0)
 
-    tmp["last_dividend"] = tmp["dividend_rub"]
+    tmp["last_dividend"] = tmp["dividend_rub"].fillna(0.0)
 
-    # approx yield
-    tmp["last_div_yield_approx"] = tmp["last_dividend"] / tmp["Close"].replace(0, np.nan)
-    tmp["last_div_yield_approx"] = tmp["last_div_yield_approx"].fillna(0.0)
-
-    # days since last dividend
-    last_div_date = tmp["date"].where(tmp["dividend_rub"] > 0).ffill()
-    tmp["days_since_last_dividend"] = (tmp["date"] - last_div_date).dt.days.fillna(9999).astype(int)
+    tmp["days_since_last_dividend"] = (
+        (tmp["date"] - tmp["last_div_date"]).dt.days.fillna(9999).astype(int)
+    )
 
     tmp["div_paid_recent_30d"] = (tmp["days_since_last_dividend"] <= 30).astype(int)
 
-    # growth of last dividend vs previous one
-    if len(div2) >= 2:
-        div2["prev_dividend"] = div2["dividend_rub"].shift(1)
-        div2["div_growth_last_tmp"] = div2["dividend_rub"] / div2["prev_dividend"].replace(0, np.nan) - 1.0
-        div2["div_growth_last_tmp"] = div2["div_growth_last_tmp"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    tmp["last_div_yield_approx"] = (
+        tmp["last_dividend"] / tmp["Close"].replace(0, np.nan)
+    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-        tmp = pd.merge_asof(
-            tmp.sort_values("date"),
-            div2[["date", "div_growth_last_tmp"]].sort_values("date"),
-            on="date",
-            direction="backward",
-        )
-        tmp["div_growth_last"] = tmp["div_growth_last_tmp"].fillna(0.0)
-        tmp = tmp.drop(columns=["div_growth_last_tmp"], errors="ignore")
-    else:
-        tmp["div_growth_last"] = 0.0
+    tmp["div_growth_last"] = tmp["div_growth_last_tmp"].fillna(0.0)
 
-    # trailing 365d dividends
-    div_events = div2.set_index("date")["dividend_rub"].sort_index()
-    daily_div = div_events.reindex(tmp["date"]).fillna(0.0)
-    tmp["div_sum_365d"] = daily_div.rolling(365, min_periods=1).sum().values
+    # sum of dividends paid over the last 365 calendar days (event-based)
+    event_days = div2["date"].values.astype("datetime64[D]").astype(np.int64)
+    event_vals = div2["dividend_rub"].values.astype(float)
+    csum = np.cumsum(event_vals)
 
+    query_days = tmp["date"].values.astype("datetime64[D]").astype(np.int64)
+    right_idx = np.searchsorted(event_days, query_days, side="right") - 1
+    left_idx = np.searchsorted(event_days, query_days - 365, side="right") - 1
+
+    right_sum = np.where(right_idx >= 0, csum[right_idx], 0.0)
+    left_sum = np.where(left_idx >= 0, csum[left_idx], 0.0)
+    tmp["div_sum_365d"] = right_sum - left_sum
+
+    tmp = tmp.drop(columns=["dividend_rub", "div_growth_last_tmp", "last_div_date"], errors="ignore")
     return tmp.set_index("date")
 
 
@@ -1323,9 +1359,13 @@ def prepare_dataset_once() -> Dict[str, Any]:
     key_rate = cbr_key_rate_range(CFG["START"], CFG["END"])
     print("Key rate rows:", len(key_rate))
 
-    print("\nLoading MOEX dividends...")
-    divs = moex_iss_dividends(CFG["TICKER"])
-    print("Div rows:", len(divs))
+    if CFG.get("USE_DIVIDENDS", False):
+        print("\nLoading MOEX dividends...")
+        divs = moex_iss_dividends(CFG["TICKER"])
+        print("Div rows:", len(divs))
+    else:
+        print("\nSkipping dividends: USE_DIVIDENDS=False")
+        divs = pd.DataFrame(columns=["date", "dividend_rub", "currency"])
 
     print("\nBuilding features (Russian sources only)...")
     feat = build_features(px, usd, imo, key_rate, divs)
@@ -1344,14 +1384,7 @@ def prepare_dataset_once() -> Dict[str, Any]:
     print("Final dataset:", feat.shape)
     print("Class share (BUY=1):", float(feat["Target"].mean().round(3)))
 
-    base_features = [
-        "ret_1", "ret_2", "ret_5", "ret_10", "ret_20", "log_ret",
-        "dist_sma20", "dist_sma50", "trend_up_200", "rsi_14",
-        "vol_rel", "bb_width", "bb_pos", "vol_ratio_5_20", "vol_spike",
-        "imoex_ret_1", "imoex_ret_5", "imoex_ret_20", "stock_vs_imoex_5",
-        "key_rate_chg", "rate_rising",
-    ]
-    FEATURES = [c for c in base_features if c in feat.columns]
+    FEATURES = [c for c in BASE_FEATURES if c in feat.columns]
 
     print("\nSELECTED FEATURES:")
     print(FEATURES)

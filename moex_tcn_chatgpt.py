@@ -22,7 +22,7 @@ from src.config.settings import (
     SHOW_MODEL_SUMMARY,
     SHOW_TRAIN_VAL_DIAG,
 )
-from src.training.callbacks import (
+from src.training.artifacts import (
     TeeStream,
     build_chat_report,
     download_artifacts_if_needed,

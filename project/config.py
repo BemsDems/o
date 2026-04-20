@@ -16,7 +16,7 @@ CFG: Dict[str, Any] = {
     "SEQ_LEN": 30,
     "TRAIN_SPLIT": 0.70,
     "VAL_SPLIT": 0.15,
-    "BATCH_SIZE": 64,
+    "BATCH_SIZE": 32,
     "EPOCHS": 100,
     "LR": 3e-4,
     "SEED": 42,

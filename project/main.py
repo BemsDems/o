@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 import numpy as np
 import pandas as pd
 import tensorflow as tf
@@ -10,15 +8,7 @@ from sklearn.utils.class_weight import compute_class_weight
 
 from project.config import CFG, seed_everything
 from project.data_loader import MultiDataset, build_multi_ticker_dataset
-from project.diagnostics import (
-    analyze_predictions_by_confidence,
-    calibration_curve_analysis,
-    check_random_baseline,
-    confusion_matrix_analysis,
-    feature_importance_proxy,
-    plot_probability_distribution,
-    temporal_performance_analysis,
-)
+from project.diagnostics import feature_importance_proxy
 from project.metrics import evaluate_global, improved_backtest_per_ticker, per_ticker_metrics
 from project.model import build_tcn_model
 from project.sequences import make_sequences_multi_ticker, time_split_masks
@@ -96,7 +86,7 @@ def main() -> None:
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor="val_auc",
             factor=0.5,
-            patience=8,
+            patience=15,
             mode="max",
             min_lr=1e-6,
             min_delta=0.001,
@@ -150,32 +140,32 @@ def main() -> None:
         best_thr = float(np.percentile(y_prob, 80))
         print(f"Fallback threshold: {best_thr:.3f}")
 
-    print("\n" + "=" * 80)
-    print("EXTENDED DIAGNOSTICS")
-    print("=" * 80)
-    plot_probability_distribution(y_test, y_prob, name="TEST")
-    calibration_curve_analysis(y_test, y_prob, n_bins=10)
-    analyze_predictions_by_confidence(y_test, y_prob, fwd_test)
-    confusion_matrix_analysis(y_test, y_prob, threshold=best_thr)
-    importances = feature_importance_proxy(model, X_test, y_test, feature_cols)
-    temporal_performance_analysis(y_test, y_prob, dates_test)
-    check_random_baseline(y_test, n_iterations=1000)
-
-    print("\n" + "=" * 80)
-    print("FINAL RESULTS")
-    print("=" * 80)
-
+    # ── Diagnostics (compact) ──
+    print("\n=== FINAL RESULTS ===")
     g = evaluate_global(y_test, y_prob, thr=best_thr)
     for k, v in g.items():
         print(f" {k}: {v:.4f}")
 
-    print("\n=== PER-TICKER (TEST) ===")
+    print("\n=== PROB SUMMARY ===")
+    print(
+        f" min={y_prob.min():.4f}, max={y_prob.max():.4f}, std={y_prob.std():.4f}, mean={y_prob.mean():.4f}"
+    )
+
+    print("\n=== FEATURE IMPORTANCE (top-5 + negative) ===")
+    importances = feature_importance_proxy(model, X_test, y_test, feature_cols)
+    if importances:
+        for fname, imp in importances[:5]:
+            print(f" {fname:>20s} | {imp:+.4f}")
+        negs = [(f, i) for f, i in importances if i < 0]
+        if negs:
+            print(" --- negative ---")
+            for fname, imp in negs:
+                print(f" {fname:>20s} | {imp:+.4f}")
+
+    print("\n=== PER-TICKER AUC ===")
     print(per_ticker_metrics(y_test, y_prob, secids_test).to_string(index=False))
 
-    print("\n=== PROB SUMMARY (TEST) ===")
-    print(pd.Series(y_prob).describe(percentiles=[0.01, 0.05, 0.1, 0.5, 0.9, 0.95, 0.99]).to_string())
-
-    print("\n=== BACKTEST (TEST) ===")
+    print("\n=== BACKTEST ===")
     bt = improved_backtest_per_ticker(
         y_prob,
         fwd_test,
@@ -186,23 +176,6 @@ def main() -> None:
     )
     print(bt.to_string(index=False))
 
-    print("\n" + "=" * 80)
-    print("РЕЗЮМЕ ДЛЯ ДИПЛОМА")
-    print("=" * 80)
-    print("Архитектура: TCN (4 блока, residual connections)")
-    print(f"Признаков: {len(feature_cols)}")
-    print(f"Тикеров: {len(CFG['TICKERS'])}")
-    print(f"Период: {CFG['START']} — {CFG['END']}")
-    print(f"Целевая: рост >= {CFG['THR_MOVE']*100:.0f}% за {CFG['HORIZON']} дней")
-    print(f"AUC-ROC: {g['AUC']:.4f}")
-    print(f"MCC: {g['MCC']:.4f}")
-    print(f"Balanced Accuracy: {g['BalAcc']:.4f}")
-
-    if importances:
-        top3 = [f[0] for f in importances[:3]]
-        print(f"Топ-3 признака: {', '.join(top3)}")
-
 
 if __name__ == "__main__":
-    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
     main()

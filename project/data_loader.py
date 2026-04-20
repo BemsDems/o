@@ -201,22 +201,17 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
         "logret_2",
         "logret_3",
         "logret_5",
-        "logret_10",
         "trend_up_20",
         "trend_up_50",
         "trend_up_200",
         "vol_rel",
         "vol_spike",
-        "rsi_14",
-        "rsi_oversold",
-        "rsi_overbought",
         "price_pos_20",
         "volatility_20",
         "macd_norm",
         "macd_hist_norm",
         "macd_cross_up",
         "bb_pos",
-        "bb_width",
     ]
     feature_cols = [c for c in feature_cols if c in full.columns]
 
@@ -234,4 +229,3 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
         MultiDataset(X=X, y=y, fwd_ret=fwd_ret, dates=dates, secids=secids),
         feature_cols,
     )
-

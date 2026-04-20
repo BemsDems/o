@@ -8,12 +8,7 @@ import tensorflow as tf
 
 
 CFG: Dict[str, Any] = {
-    "TICKERS": [
-        "SBER", "GAZP", "LKOH", "YNDX",
-        "GMKN", "NVTK", "ROSN", "TATN",
-        "MTSS", "MGNT", "ALRS", "PLZL",
-        "CHMF", "NLMK", "VTBR",
-    ],
+    "TICKERS": ["SBER", "GAZP", "LKOH", "YNDX"],
     "START": "2015-01-01",
     "END": datetime.now().strftime("%Y-%m-%d"),
     "HORIZON": 5,
@@ -33,4 +28,3 @@ CFG: Dict[str, Any] = {
 def seed_everything() -> None:
     np.random.seed(int(CFG["SEED"]))
     tf.random.set_seed(int(CFG["SEED"]))
-

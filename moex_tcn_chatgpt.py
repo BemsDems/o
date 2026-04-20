@@ -68,7 +68,11 @@ if __name__ == "__main__":
 
                 results = []
                 for sd in CFG.get("RUN_SEEDS", [42]):
-                    res = run_once(int(sd), prepared, run_dir=run_dir)
+                    try:
+                        res = run_once(int(sd), prepared, run_dir=run_dir)
+                    except TypeError:
+                        # Backward compatibility if older train.py is cached in the runtime
+                        res = run_once(int(sd), prepared)
                     results.append(res)
                     print(
                         f"Seed {sd}: "

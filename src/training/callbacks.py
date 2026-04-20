@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import random
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
@@ -22,6 +20,11 @@ def set_global_seed(seed: int):
     tf.random.set_seed(seed)
     try:
         tf.keras.utils.set_random_seed(seed)
+    except Exception:
+        pass
+
+    try:
+        tf.config.experimental.enable_op_determinism()
     except Exception:
         pass
 
@@ -155,10 +158,6 @@ def build_chat_report(run_dir: Path, cfg: dict, df: pd.DataFrame, summary: pd.Da
         df.to_string(index=False),
     ]
     return "\n".join(lines)
-    try:
-        tf.config.experimental.enable_op_determinism()
-    except Exception:
-        pass
 
 
 class ShortMetrics(tf.keras.callbacks.Callback):

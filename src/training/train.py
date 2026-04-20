@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import gc
 import os
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 
 from sklearn.metrics import average_precision_score, roc_auc_score
@@ -17,7 +19,11 @@ from src.models.tcn_model import build_tcn_model
 from src.training.callbacks import ShortMetrics, set_global_seed
 
 
-def run_once(run_seed: int, prepared: Dict[str, Any]) -> Dict[str, Any]:
+def run_once(
+    run_seed: int,
+    prepared: Dict[str, Any],
+    run_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
     """Run one full train/eval cycle for a given seed (data is already prepared)."""
     tf.keras.backend.clear_session()
     gc.collect()
@@ -125,7 +131,13 @@ def run_once(run_seed: int, prepared: Dict[str, Any]) -> Dict[str, Any]:
     print(f"PROB DRIFT PSI(train→test): {p_psi:.3f} (if >0.25 — strong shift)")
     print("=" * 70)
 
-    thr_f1, thr_pnl, _ = pick_threshold_on_val(y_val, prob_val, fret_val, CFG["HORIZON"], CFG["FEE"])
+    thr_f1, thr_pnl, thr_tab = pick_threshold_on_val(
+        y_val,
+        prob_val,
+        fret_val,
+        CFG["HORIZON"],
+        CFG["FEE"],
+    )
 
     hist_info = history_summary(history)
     test_metrics = compact_prob_metrics(y_test, prob_test)
@@ -178,6 +190,33 @@ def run_once(run_seed: int, prepared: Dict[str, Any]) -> Dict[str, Any]:
     )
     print("=" * 70)
 
+    alpha_thr_pnl = float(bt_pnl["alpha"])
+    n_trades_thr_pnl = int(bt_pnl["n_trades"])
+
+    if bool(CFG.get("SAVE_PER_SEED_TABLES", True)) and run_dir is not None:
+        seed_dir = Path(run_dir) / f"seed_{int(run_seed)}"
+        seed_dir.mkdir(parents=True, exist_ok=True)
+
+        thr_tab.to_csv(seed_dir / "thresholds_val.csv", index=False)
+        dec_test.to_csv(seed_dir / "decile_test.csv", index=False)
+
+        pd.DataFrame(
+            [
+                {
+                    "seed": int(run_seed),
+                    "best_epoch": int(hist_info["best_epoch"]) if pd.notna(hist_info["best_epoch"]) else np.nan,
+                    "thr_f1": float(thr_f1),
+                    "thr_pnl": float(thr_pnl),
+                    "roc_auc": float(test_metrics["roc_auc"]),
+                    "pr_auc": float(test_metrics["pr_auc"]),
+                    "logloss_gain_vs_baseline": float(test_metrics["logloss_gain_vs_baseline"]),
+                    "prob_psi": float(p_psi),
+                    "alpha_thr_pnl": float(alpha_thr_pnl),
+                    "n_trades_thr_pnl": int(n_trades_thr_pnl),
+                }
+            ]
+        ).to_csv(seed_dir / "seed_summary.csv", index=False)
+
     # For summary table
     return {
         "seed": int(run_seed),
@@ -185,10 +224,9 @@ def run_once(run_seed: int, prepared: Dict[str, Any]) -> Dict[str, Any]:
         "pr_auc": float(test_metrics["pr_auc"]),
         "logloss_gain_vs_baseline": float(test_metrics["logloss_gain_vs_baseline"]),
         "prob_psi": float(p_psi),
-        "alpha_thr_pnl": float(bt_pnl["alpha"]),
-        "n_trades_thr_pnl": int(bt_pnl["n_trades"]),
+        "alpha_thr_pnl": float(alpha_thr_pnl),
+        "n_trades_thr_pnl": int(n_trades_thr_pnl),
         "best_epoch": int(hist_info["best_epoch"]) if np.isfinite(hist_info["best_epoch"]) else -1,
         "thr_f1": float(thr_f1),
         "thr_pnl": float(thr_pnl),
     }
-

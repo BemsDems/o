@@ -45,6 +45,12 @@ CFG: Dict[str, Any] = {
 
     # Save model/scaler only for single-seed runs
     "SAVE_SINGLE_RUN_ARTIFACTS": False,
+
+    # Artifacts / experiment packaging
+    "SAVE_RUN_ARTIFACTS": True,
+    "SAVE_PER_SEED_TABLES": True,
+    "ARTIFACTS_DIR": "artifacts",
+    "RUN_TAG": None,  # None => timestamp
 }
 
 
@@ -75,4 +81,3 @@ class FundamentalConfig:
 
 
 CFG_FUND = FundamentalConfig()
-

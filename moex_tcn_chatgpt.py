@@ -32,7 +32,6 @@ from src.training.artifacts import (
     write_text,
 )
 from src.training.dataset import prepare_dataset_once
-from src.training.train import run_once
 
 
 if __name__ == "__main__":
@@ -65,6 +64,14 @@ if __name__ == "__main__":
 
                 prepared = prepare_dataset_once()
                 save_prepared_snapshot(run_dir, prepared, CFG)
+
+                # Colab notebooks can keep old modules in memory across runs.
+                # Force-reload train module to ensure run_once has the latest signature.
+                import importlib
+                import src.training.train as _train
+
+                _train = importlib.reload(_train)
+                run_once = _train.run_once
 
                 results = []
                 for sd in CFG.get("RUN_SEEDS", [42]):

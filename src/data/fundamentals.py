@@ -1,0 +1,337 @@
+from __future__ import annotations
+
+"""Fundamentals scaffold (optional).
+
+Not used in the current practical baseline, but kept for the diploma scaffold.
+"""
+
+import re
+from io import StringIO
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+import requests
+
+from src.config.settings import CFG_FUND
+
+
+def make_session(user_agent: str) -> requests.Session:
+    s = requests.Session()
+    s.headers.update(
+        {
+            "User-Agent": user_agent,
+            "Accept": "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+    )
+    return s
+
+
+class EDisclosureClient:
+    """API-first client for e-disclosure.
+
+    IMPORTANT:
+    - Exact endpoint paths and params must be taken from your Swagger UI / account.
+    - This is a scaffold: plug in real `path` + response mapping.
+    """
+
+    def __init__(
+        self,
+        token: str,
+        base_url: str,
+        timeout: int = 30,
+        user_agent: str = "Mozilla/5.0",
+    ):
+        if not token:
+            raise ValueError("EDISCLOSURE_TOKEN не задан.")
+        self.base_url = base_url.rstrip("/")
+        self.timeout = int(timeout)
+        self.s = make_session(user_agent)
+        self.s.headers.update({"Authorization": f"Bearer {token}"})
+
+    def _get(self, path: str, params: Optional[dict] = None):
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        r = self.s.get(url, params=params, timeout=self.timeout)
+        r.raise_for_status()
+        ctype = r.headers.get("Content-Type", "")
+        if "json" in ctype.lower():
+            return r.json()
+        return r.text
+
+    def search_disclosures(
+        self,
+        ticker: str,
+        date_from: str,
+        date_to: str,
+        limit: int = 200,
+    ) -> pd.DataFrame:
+        """Search disclosures for given ticker in [date_from, date_to].
+
+        TODO: plug correct endpoint from Swagger.
+        """
+
+        # ===== PLUG FROM SWAGGER =====
+        path = "/TODO/search/disclosures"
+        params = {
+            "ticker": ticker,
+            "dateFrom": date_from,
+            "dateTo": date_to,
+            "limit": int(limit),
+        }
+        data = self._get(path, params=params)
+
+        rows = []
+        items = data.get("items", []) if isinstance(data, dict) else []
+        for x in items:
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "publish_date": x.get("publishDate"),
+                    "title": x.get("title"),
+                    "category": x.get("category"),
+                    "issuer_name": x.get("issuerName"),
+                    "message_id": x.get("id"),
+                    "message_url": x.get("url"),
+                    "attachment_url": x.get("attachmentUrl"),
+                    "source": "e-disclosure",
+                }
+            )
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df["publish_date"] = pd.to_datetime(df["publish_date"], errors="coerce")
+            df = df.sort_values("publish_date").reset_index(drop=True)
+        return df
+
+
+def _to_float_ru(x):
+    if pd.isna(x):
+        return np.nan
+    s = str(x).strip()
+    if s in {"", "-", "—", "–", "nan", "None"}:
+        return np.nan
+    s = s.replace(" ", "")
+    s = s.replace("%", "")
+    s = s.replace(",", ".")
+    s = re.sub(r"[^\d\.\-]", "", s)
+    if s in {"", "-", "."}:
+        return np.nan
+    try:
+        return float(s)
+    except Exception:
+        return np.nan
+
+
+def _smartlab_url(ticker: str, report_type: str = "MSFO", freq: str = "q") -> str:
+    return f"https://smart-lab.ru/q/{ticker}/f/{freq}/{report_type}/"
+
+
+def fetch_smartlab_financials(
+    ticker: str,
+    report_type: str = "MSFO",
+    freq: str = "q",
+    timeout: int = 30,
+    user_agent: str = "Mozilla/5.0",
+) -> pd.DataFrame:
+    url = _smartlab_url(ticker, report_type=report_type, freq=freq)
+    s = make_session(user_agent)
+    html = s.get(url, timeout=timeout).text
+
+    tables = pd.read_html(StringIO(html))
+    if not tables:
+        return pd.DataFrame()
+
+    tbl = max(tables, key=lambda x: x.shape[1]).copy()
+    tbl.columns = [str(c).strip() for c in tbl.columns]
+
+    metric_col = tbl.columns[0]
+    tbl[metric_col] = tbl[metric_col].astype(str).str.strip()
+
+    value_cols = [c for c in tbl.columns[1:] if str(c).strip()]
+    long_rows = []
+    for _, row in tbl.iterrows():
+        metric = str(row[metric_col]).strip()
+        for col in value_cols:
+            long_rows.append(
+                {
+                    "metric_ru": metric,
+                    "period": str(col).strip(),
+                    "value_raw": row[col],
+                    "ticker": ticker,
+                    "source": "smart-lab",
+                    "report_type": report_type,
+                }
+            )
+
+    df = pd.DataFrame(long_rows)
+    if df.empty:
+        return df
+
+    date_mask = df["metric_ru"].str.contains("Дата отчета", case=False, na=False)
+    date_map = df[date_mask][["period", "value_raw"]].rename(columns={"value_raw": "publish_date"}).copy()
+    if not date_map.empty:
+        date_map["publish_date"] = pd.to_datetime(date_map["publish_date"], dayfirst=True, errors="coerce")
+
+    df = df[~date_mask].copy()
+
+    metric_map = {
+        "Выручка": "revenue",
+        "EBITDA": "ebitda",
+        "Чистая прибыль": "net_income",
+        "Чистая прибыль н/с": "net_income",
+        "EPS": "eps",
+        "ROE": "roe",
+        "P/B": "pb_ratio",
+        "P/BV": "pb_ratio",
+        "Чистая рентаб": "net_margin",
+        "Чистая маржа": "net_margin",
+        "Долг/EBITDA": "debt_ebitda",
+        "Долг": "debt",
+        "Чистый долг": "net_debt",
+    }
+
+    def map_metric(x: str) -> Optional[str]:
+        for k, v in metric_map.items():
+            if x.startswith(k):
+                return v
+        return None
+
+    df["metric"] = df["metric_ru"].map(map_metric)
+    df = df[df["metric"].notna()].copy()
+    df["value"] = df["value_raw"].map(_to_float_ru)
+
+    if not date_map.empty:
+        df = df.merge(date_map, on="period", how="left")
+    else:
+        df["publish_date"] = pd.NaT
+
+    out = (
+        df.pivot_table(
+            index=["ticker", "period", "publish_date", "source", "report_type"],
+            columns="metric",
+            values="value",
+            aggfunc="first",
+        )
+        .reset_index()
+    )
+    out.columns.name = None
+    out = out.sort_values(["publish_date", "period"]).reset_index(drop=True)
+    return out
+
+
+def normalize_fundamentals(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(
+            columns=[
+                "ticker",
+                "period",
+                "publish_date",
+                "source",
+                "revenue",
+                "ebitda",
+                "net_income",
+                "eps",
+                "roe",
+                "pb_ratio",
+                "net_margin",
+            ]
+        )
+
+    out = df.copy()
+    out["publish_date"] = pd.to_datetime(out["publish_date"], errors="coerce")
+    out = out.dropna(subset=["publish_date"]).sort_values("publish_date").reset_index(drop=True)
+
+    for c in ["revenue", "ebitda", "net_income", "eps", "roe", "pb_ratio", "net_margin"]:
+        if c not in out.columns:
+            out[c] = np.nan
+
+    return out[
+        [
+            "ticker",
+            "period",
+            "publish_date",
+            "source",
+            "revenue",
+            "ebitda",
+            "net_income",
+            "eps",
+            "roe",
+            "pb_ratio",
+            "net_margin",
+        ]
+    ]
+
+
+def combine_fundamental_sources(*dfs: pd.DataFrame) -> pd.DataFrame:
+    parts = [x.copy() for x in dfs if x is not None and not x.empty]
+    if not parts:
+        return pd.DataFrame()
+
+    out = pd.concat(parts, ignore_index=True)
+    out["publish_date"] = pd.to_datetime(out["publish_date"], errors="coerce")
+    out = out.dropna(subset=["publish_date"]).sort_values("publish_date").reset_index(drop=True)
+
+    source_priority = {"e-disclosure": 0, "smart-lab": 1, "ir": 2}
+    out["_prio"] = out["source"].map(source_priority).fillna(99)
+    out = out.sort_values(["ticker", "period", "_prio", "publish_date"])
+    out = out.drop_duplicates(subset=["ticker", "period"], keep="first").drop(columns="_prio")
+
+    return out.reset_index(drop=True)
+
+
+def add_fundamental_features_past_only(
+    price_df: pd.DataFrame,
+    fund_df: pd.DataFrame,
+    ticker: str,
+    lag_days: int = 1,
+) -> pd.DataFrame:
+    """Attach fundamentals to daily candles WITHOUT leakage."""
+
+    out = price_df.copy().sort_index()
+    out = out.reset_index().rename(columns={out.columns[0]: "date"})
+    out["date"] = pd.to_datetime(out["date"])
+
+    if fund_df is None or fund_df.empty:
+        return out.set_index("date")
+
+    f = fund_df[fund_df["ticker"] == ticker].copy()
+    if f.empty:
+        return out.set_index("date")
+
+    f["publish_date"] = pd.to_datetime(f["publish_date"], errors="coerce")
+    f = f.dropna(subset=["publish_date"]).sort_values("publish_date").reset_index(drop=True)
+
+    if lag_days:
+        f["effective_date"] = f["publish_date"] + pd.Timedelta(days=int(lag_days))
+    else:
+        f["effective_date"] = f["publish_date"]
+
+    cols_keep = [
+        "effective_date",
+        "revenue",
+        "ebitda",
+        "net_income",
+        "eps",
+        "roe",
+        "pb_ratio",
+        "net_margin",
+    ]
+    cols_keep = [c for c in cols_keep if c in f.columns]
+
+    out = pd.merge_asof(
+        out.sort_values("date"),
+        f[cols_keep].sort_values("effective_date"),
+        left_on="date",
+        right_on="effective_date",
+        direction="backward",
+    )
+
+    out = out.drop(columns=["effective_date"], errors="ignore")
+
+    if "roe" in out.columns and "pb_ratio" in out.columns:
+        out["value_quality"] = out["roe"] / out["pb_ratio"].replace(0, np.nan)
+
+    if "net_income" in out.columns and "revenue" in out.columns:
+        out["net_margin_calc"] = out["net_income"] / out["revenue"].replace(0, np.nan)
+
+    return out.set_index("date")
+

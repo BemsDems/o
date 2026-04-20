@@ -98,7 +98,7 @@ def main() -> None:
         validation_data=(X_val, y_val),
         epochs=int(CFG["EPOCHS"]),
         batch_size=int(CFG["BATCH_SIZE"]),
-        shuffle=True,
+        shuffle=False,
         class_weight=cw,
         callbacks=cb,
         verbose=2,

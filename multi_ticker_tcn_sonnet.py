@@ -448,16 +448,12 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
     x = tf.keras.layers.Dropout(0.25)(x)
     out = tf.keras.layers.Dense(1, activation="sigmoid")(x)
 
-    # Cosine decay schedule
-    lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
-        initial_learning_rate=float(CFG["LR"]),
-        decay_steps=2000,
-        alpha=0.1,
-    )
-
     model = tf.keras.Model(x_in, out)
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule, clipnorm=1.0),
+        optimizer=tf.keras.optimizers.Adam(
+            learning_rate=float(CFG["LR"]),  # float, not a schedule (for ReduceLROnPlateau compatibility)
+            clipnorm=1.0,
+        ),
         loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.02),
         metrics=[tf.keras.metrics.AUC(name="auc")],
     )
@@ -876,6 +872,7 @@ def main() -> None:
             patience=8,
             mode="max",
             min_lr=1e-6,
+            min_delta=0.001,
         ),
     ]
 

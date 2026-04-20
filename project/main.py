@@ -89,7 +89,6 @@ def main() -> None:
             patience=15,
             mode="max",
             min_lr=1e-6,
-            min_delta=0.001,
         ),
     ]
 

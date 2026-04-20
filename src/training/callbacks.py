@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 import os
 import random
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -158,6 +159,49 @@ def build_chat_report(run_dir: Path, cfg: dict, df: pd.DataFrame, summary: pd.Da
         df.to_string(index=False),
     ]
     return "\n".join(lines)
+
+
+def is_colab() -> bool:
+    try:
+        import google.colab  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def download_artifacts_if_needed(run_dir: Path, cfg: dict) -> Optional[Path]:
+    if not bool(cfg.get("AUTO_DOWNLOAD_ARTIFACTS", False)):
+        return None
+
+    if not is_colab():
+        print("AUTO_DOWNLOAD_ARTIFACTS=True, но среда не Colab — скачивание пропущено.")
+        return None
+
+    try:
+        from google.colab import files
+    except Exception:
+        print("Не удалось импортировать google.colab.files — скачивание пропущено.")
+        return None
+
+    run_dir = Path(run_dir)
+
+    if bool(cfg.get("DOWNLOAD_ARTIFACTS_AS_ZIP", True)):
+        zip_base = str(run_dir)
+        zip_path = shutil.make_archive(zip_base, "zip", root_dir=run_dir.parent, base_dir=run_dir.name)
+        print(f"Downloading ZIP: {zip_path}")
+        files.download(zip_path)
+        return Path(zip_path)
+
+    # fallback: download for_chat.txt only
+    for_chat = run_dir / "for_chat.txt"
+    if for_chat.exists():
+        print(f"Downloading file: {for_chat}")
+        files.download(str(for_chat))
+        return for_chat
+
+    print("Нет файлов для скачивания.")
+    return None
 
 
 class ShortMetrics(tf.keras.callbacks.Callback):

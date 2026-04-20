@@ -25,6 +25,7 @@ from src.config.settings import (
 from src.training.callbacks import (
     TeeStream,
     build_chat_report,
+    download_artifacts_if_needed,
     make_run_dir,
     save_json,
     save_prepared_snapshot,
@@ -121,6 +122,10 @@ if __name__ == "__main__":
                 print(run_dir / "multi_seed_summary.csv")
                 print(run_dir / "multi_seed_aggregated.csv")
                 print(run_dir / "for_chat.txt")
+
+                downloaded_path = download_artifacts_if_needed(run_dir, CFG)
+                if downloaded_path is not None:
+                    print(f"Auto-downloaded: {downloaded_path}")
 
         except Exception:
             err = traceback.format_exc()

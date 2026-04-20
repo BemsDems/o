@@ -51,6 +51,9 @@ CFG: Dict[str, Any] = {
     "SAVE_PER_SEED_TABLES": True,
     "ARTIFACTS_DIR": "artifacts",
     "RUN_TAG": None,  # None => timestamp
+
+    "AUTO_DOWNLOAD_ARTIFACTS": True,
+    "DOWNLOAD_ARTIFACTS_AS_ZIP": True,
 }
 
 

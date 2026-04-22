@@ -86,18 +86,13 @@ BASE_FEATURES = [
 FUND_FEATURES = [
     "roe",
     "pb_ratio",
-    "net_margin",
     "value_quality",
-    "log_revenue",
-    "log_net_income",
     "eps",
+    "fund_age_days",
 
     "roe_is_missing",
     "pb_ratio_is_missing",
-    "net_margin_is_missing",
     "value_quality_is_missing",
-    "log_revenue_is_missing",
-    "log_net_income_is_missing",
     "eps_is_missing",
 ]
 

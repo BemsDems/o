@@ -338,6 +338,11 @@ def add_fundamental_features_past_only(
         direction="backward",
     )
 
+    out["fund_age_days"] = (
+        (out["date"] - out["effective_date"]).dt.days
+        .clip(lower=0)
+    )
+
     out = out.drop(columns=["effective_date"], errors="ignore")
 
     # derived features
@@ -366,16 +371,16 @@ def add_fundamental_features_past_only(
     fund_core_cols = [
         "roe",
         "pb_ratio",
-        "net_margin",
         "value_quality",
-        "log_revenue",
-        "log_net_income",
         "eps",
     ]
     for c in fund_core_cols:
         if c not in out.columns:
             out[c] = np.nan
         out[f"{c}_is_missing"] = out[c].isna().astype(int)
+
+    if "fund_age_days" not in out.columns:
+        out["fund_age_days"] = np.nan
 
     if out["date"].dt.year.min() < 1990:
         raise ValueError(

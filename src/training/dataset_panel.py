@@ -145,16 +145,16 @@ def prepare_dataset_once_panel() -> Dict[str, Any]:
     fund_core_cols = [
         "roe",
         "pb_ratio",
-        "net_margin",
         "value_quality",
-        "log_revenue",
-        "log_net_income",
         "eps",
+        "fund_age_days",
     ]
     present_fund_core = [c for c in fund_core_cols if c in feat.columns]
 
     if present_fund_core:
         print("\nFUNDAMENTAL COVERAGE BY TICKER BEFORE FILL (non-null share):")
+        print("\nFUNDAMENTAL FEATURE LIST USED:")
+        print([c for c in FUND_FEATURES if c in feat.columns])
         cov_before = feat.groupby("ticker")[present_fund_core].apply(lambda x: x.notna().mean())
         print(cov_before.to_string())
 
@@ -163,10 +163,16 @@ def prepare_dataset_once_panel() -> Dict[str, Any]:
             feat[c] = pd.to_numeric(feat[c], errors="coerce")
             feat[c] = feat[c].replace([np.inf, -np.inf], np.nan)
 
-            med = feat.loc[feat["split"] == "train", c].median()
-            if pd.isna(med):
-                med = 0.0
-            feat[c] = feat[c].fillna(med)
+            if c == "fund_age_days":
+                fill_value = float(feat.loc[feat["split"] == "train", c].max())
+                if pd.isna(fill_value):
+                    fill_value = 9999.0
+            else:
+                fill_value = float(feat.loc[feat["split"] == "train", c].median())
+                if pd.isna(fill_value):
+                    fill_value = 0.0
+
+            feat[c] = feat[c].fillna(fill_value)
 
         print("\nFUNDAMENTAL COVERAGE BY TICKER AFTER FILL (non-null share):")
         cov_after = feat.groupby("ticker")[present_fund_core].apply(lambda x: x.notna().mean())
@@ -187,7 +193,7 @@ def prepare_dataset_once_panel() -> Dict[str, Any]:
     print(f"Ticker features added: {ticker_features}")
 
     if CFG.get("USE_FUNDAMENTALS", False):
-        expected_fund = {"roe", "pb_ratio", "net_margin", "value_quality"}
+        expected_fund = {"roe", "pb_ratio", "value_quality", "eps", "fund_age_days"}
         missing_fund = sorted(expected_fund - set(FEATURES))
         if missing_fund:
             print(f"WARNING: some expected fundamental features are missing: {missing_fund}")

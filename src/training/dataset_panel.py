@@ -85,6 +85,10 @@ def prepare_dataset_once_panel() -> Dict[str, Any]:
             )
 
         feat_i = add_target(feat_i, int(CFG["HORIZON"]), float(CFG["THR_MOVE"]))
+        print(
+            f"{ticker} after target: rows={len(feat_i)} | "
+            f"date_min={feat_i.index.min()} | date_max={feat_i.index.max()}"
+        )
         if feat_i.empty:
             print(f"Skip {ticker}: empty feature dataset after target")
             continue
@@ -104,6 +108,10 @@ def prepare_dataset_once_panel() -> Dict[str, Any]:
     print("\nPanel dataset:", feat.shape)
     print("Rows by ticker:")
     print(feat["ticker"].value_counts().sort_index().to_string())
+
+    print("\nDate range by ticker:")
+    date_rng = feat.groupby("ticker")["date"].agg(["min", "max", "count"])
+    print(date_rng.to_string())
     print("Class share (BUY=1):", float(feat["Target"].mean().round(3)))
 
     print("\nTarget share by ticker:")
@@ -146,9 +154,9 @@ def prepare_dataset_once_panel() -> Dict[str, Any]:
     present_fund_core = [c for c in fund_core_cols if c in feat.columns]
 
     if present_fund_core:
-        print("\nFUNDAMENTAL COVERAGE BY TICKER (non-null share):")
-        cov = feat.groupby("ticker")[present_fund_core].apply(lambda x: x.notna().mean())
-        print(cov.to_string())
+        print("\nFUNDAMENTAL COVERAGE BY TICKER BEFORE FILL (non-null share):")
+        cov_before = feat.groupby("ticker")[present_fund_core].apply(lambda x: x.notna().mean())
+        print(cov_before.to_string())
 
         # Make sure fund columns are numeric and fill NaNs with TRAIN median (past-only).
         for c in present_fund_core:
@@ -159,6 +167,10 @@ def prepare_dataset_once_panel() -> Dict[str, Any]:
             if pd.isna(med):
                 med = 0.0
             feat[c] = feat[c].fillna(med)
+
+        print("\nFUNDAMENTAL COVERAGE BY TICKER AFTER FILL (non-null share):")
+        cov_after = feat.groupby("ticker")[present_fund_core].apply(lambda x: x.notna().mean())
+        print(cov_after.to_string())
 
     ticker_features = sorted(ticker_dummies.columns.tolist())
     fund_features_present = [c for c in FUND_FEATURES if c in feat.columns]

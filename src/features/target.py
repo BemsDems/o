@@ -10,8 +10,11 @@ def add_target(df: pd.DataFrame, horizon: int, thr: float) -> pd.DataFrame:
     out = df.copy()
     out["future_close"] = out["Close"].shift(-horizon)
     out["future_ret"] = (out["future_close"] - out["Close"]) / (out["Close"] + 1e-12)
+
+    # Drop only rows where target cannot be computed because of horizon shift.
+    out = out.dropna(subset=["future_close", "future_ret"]).copy()
+
     out["Target"] = (out["future_ret"] >= thr).astype(int)
-    out = out.dropna().copy()
     return out
 
 

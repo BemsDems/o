@@ -14,7 +14,14 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 from src.config.settings import CFG, FIT_VERBOSE, SHOW_MODEL_SUMMARY, SHOW_TRAIN_VAL_DIAG
 from src.evaluation.backtest import panel_backtest_by_ticker
 from src.evaluation.diagnostics import decile_report, drift_report_features, prob_summary, psi_1d
-from src.evaluation.metrics import compact_prob_metrics, history_summary, make_decile_table, pick_threshold_on_val_panel
+from src.evaluation.metrics import (
+    apply_platt_calibrator,
+    compact_prob_metrics,
+    fit_platt_calibrator,
+    history_summary,
+    make_decile_table,
+    pick_threshold_on_val_panel,
+)
 from src.models.tcn_model import build_tcn_model
 from src.training.callbacks import ShortMetrics, set_global_seed
 
@@ -109,6 +116,34 @@ def run_once_panel(
         prob_train = 1 - prob_train
         prob_val = 1 - prob_val
         prob_test = 1 - prob_test
+
+    # Optional Platt scaling on the tail of VAL (no TEST leakage).
+    if bool(CFG.get("USE_PLATT_CALIBRATION", True)):
+        n_cal = max(
+            int(len(y_val) * float(CFG.get("CALIB_VAL_TAIL_FRAC", 0.50))),
+            int(CFG.get("CALIB_VAL_MIN_SAMPLES", 120)),
+        )
+        n_cal = min(n_cal, len(y_val))
+
+        if n_cal >= 10 and len(np.unique(y_val[-n_cal:])) > 1:
+            calibrator = fit_platt_calibrator(
+                y_val[-n_cal:],
+                prob_val[-n_cal:],
+            )
+
+            prob_train = apply_platt_calibrator(calibrator, prob_train)
+            prob_val = apply_platt_calibrator(calibrator, prob_val)
+            prob_test = apply_platt_calibrator(calibrator, prob_test)
+
+            print(f"Applied Platt calibration on last {n_cal} VAL samples")
+            print(
+                "Calibrated prob means | "
+                f"train={prob_train.mean():.4f} "
+                f"val={prob_val.mean():.4f} "
+                f"test={prob_test.mean():.4f}"
+            )
+        else:
+            print(f"Skip Platt calibration: n_cal={n_cal}, classes={np.unique(y_val[-n_cal:])}")
 
     if SHOW_TRAIN_VAL_DIAG:
         prob_summary("TRAIN", y_train, prob_train)

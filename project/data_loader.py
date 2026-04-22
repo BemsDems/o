@@ -118,15 +118,13 @@ def fetch_macro_data(start: str, end: str) -> pd.DataFrame:
         out["usdrub_logret_5"] = 0.0
         out["usdrub_volatility_20"] = 0.0
 
-    # Brent
+    # Brent (optional). If we failed to fetch a stable proxy, we deliberately
+    # DO NOT create placeholder zero columns to avoid "fake" macro features.
     if "brent_close" in close_tbl.columns:
         c = close_tbl["brent_close"]
         for lag in (1, 5):
             ratio = (c / c.shift(lag)).clip(0.5, 2.0)
             out[f"brent_logret_{lag}"] = np.log(ratio).replace([np.inf, -np.inf], np.nan)
-    else:
-        out["brent_logret_1"] = 0.0
-        out["brent_logret_5"] = 0.0
 
     # IMOEX
     if "imoex_close" in close_tbl.columns:

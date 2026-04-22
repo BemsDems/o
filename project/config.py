@@ -29,7 +29,7 @@ CFG: Dict[str, Any] = {
 
 
 # Human-readable fingerprint printed at runtime to detect stale Colab imports.
-CODE_FINGERPRINT = "sonnet-v1: shuffle=True, class_weight=None, per-run seed"
+CODE_FINGERPRINT = "sonnet-v2: dropout=0.5, shuffle=True, class_weight=None, per-run seed"
 
 
 def seed_everything(seed: int | None = None) -> None:

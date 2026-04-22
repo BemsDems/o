@@ -11,8 +11,8 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
     x_in = tf.keras.Input(shape=input_shape)
     x = tf.keras.layers.LayerNormalization()(x_in)
 
-    # Original architecture (kept for apples-to-apples comparison).
-    for filters, dilation in [(64, 1), (64, 2), (64, 4), (32, 8)]:
+    # Smaller TCN to reduce overfitting (fewer params) + strong dropout.
+    for filters, dilation in [(32, 1), (32, 2), (16, 4)]:
         x = tf.keras.layers.Conv1D(
             filters,
             kernel_size=3,

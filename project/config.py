@@ -23,13 +23,23 @@ CFG: Dict[str, Any] = {
     "LR": 3e-4,
     "SEED": 42,
     "N_RUNS": 3,
+
+    # Ensemble is a defensible way to improve stability without "picking the best seed".
+    "USE_ENSEMBLE": True,
+    "ENSEMBLE_SEEDS": [42, 43, 44, 45, 46],
+
+    # Early stopping tuned for fast overfitting regimes.
+    "ES_PATIENCE": 5,
+    "ES_MIN_DELTA": 0.005,
     "FEE": 0.001,
     "EXTENDED_DIAGNOSTICS": True,
 }
 
 
 # Human-readable fingerprint printed at runtime to detect stale Colab imports.
-CODE_FINGERPRINT = "sonnet-v2: dropout=0.5, shuffle=True, class_weight=None, per-run seed"
+CODE_FINGERPRINT = (
+    "sonnet-v3: ensemble(42..46)+smallTCN+dropout=0.5+ES(p5,delta0.005)+shuffle=True+noCW"
+)
 
 
 def seed_everything(seed: int | None = None) -> None:

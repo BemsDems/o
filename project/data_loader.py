@@ -6,6 +6,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
+import requests
 from moexalgo import Ticker
 
 from project.config import CFG
@@ -32,6 +33,129 @@ def fetch_moex_candles(secid: str, start: str, end: str | None) -> pd.DataFrame:
     df = df.rename(columns={"close": "CLOSE", "high": "HIGH", "low": "LOW", "volume": "VOLUME"})
     df["secid"] = str(secid)
     return df
+
+
+# ── Dividend fundamentals (MOEX ISS) ────────────────────────────────────────
+
+
+def fetch_dividends_moex(secid: str, timeout: int = 15) -> pd.DataFrame:
+    """Fetch full dividend history from MOEX ISS.
+
+    Returns DataFrame with columns:
+      - registryclosedate: record date (public anchor)
+      - value: dividend per share (RUB)
+
+    Endpoint:
+      https://iss.moex.com/iss/securities/{secid}/dividends.json
+    """
+    url = f"https://iss.moex.com/iss/securities/{secid}/dividends.json"
+    try:
+        r = requests.get(url, timeout=int(timeout))
+        r.raise_for_status()
+        data = r.json()
+
+        block = data.get("dividends", {})
+        cols = block.get("columns", [])
+        rows = block.get("data", [])
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows, columns=cols)
+        if "registryclosedate" not in df.columns or "value" not in df.columns:
+            return pd.DataFrame()
+
+        df["registryclosedate"] = pd.to_datetime(df["registryclosedate"], errors="coerce")
+        df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        df = df.dropna(subset=["registryclosedate", "value"]).copy()
+
+        # Filter to RUB only (avoid mixing currencies)
+        if "currencyid" in df.columns:
+            df["currencyid"] = df["currencyid"].astype(str)
+            df = df[df["currencyid"].str.upper() == "RUB"].copy()
+
+        df = df.sort_values("registryclosedate").reset_index(drop=True)
+        return df[["registryclosedate", "value"]]
+    except Exception as e:
+        print(f"  [div] {secid}: fetch failed ({type(e).__name__}: {e})")
+        return pd.DataFrame()
+
+
+def add_dividend_features_past_only(
+    price_df: pd.DataFrame,
+    div_df: pd.DataFrame,
+    *,
+    lag_days: int = 1,
+) -> pd.DataFrame:
+    """Attach dividend-based features WITHOUT leakage.
+
+    Methodology:
+    - effective_date = registryclosedate + lag_days (extra safety)
+    - For each price date, use only dividends with effective_date <= date
+    - Compute TTM dividend sum over past 365 days
+
+    Adds:
+      - div_yield_ttm
+      - days_since_last_div (normalized to [0,1])
+      - div_yield_is_missing
+    """
+    out = price_df.copy().reset_index()
+    out = out.rename(columns={out.columns[0]: "date"})
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
+
+    if div_df is None or div_df.empty:
+        out["div_yield_ttm"] = 0.0
+        out["days_since_last_div"] = 1.0
+        out["div_yield_is_missing"] = 1
+        return out.set_index("date")
+
+    d = div_df.copy()
+    d["registryclosedate"] = pd.to_datetime(d["registryclosedate"], errors="coerce")
+    d["value"] = pd.to_numeric(d["value"], errors="coerce")
+    d = d.dropna(subset=["registryclosedate", "value"]).sort_values("registryclosedate").reset_index(drop=True)
+    if d.empty:
+        out["div_yield_ttm"] = 0.0
+        out["days_since_last_div"] = 1.0
+        out["div_yield_is_missing"] = 1
+        return out.set_index("date")
+
+    d["effective_date"] = d["registryclosedate"] + pd.Timedelta(days=int(lag_days))
+    d = d.sort_values("effective_date").reset_index(drop=True)
+
+    out_sorted = out.sort_values("date").reset_index(drop=True)
+
+    # last dividend effective date per row
+    last_div = pd.merge_asof(
+        out_sorted[["date"]],
+        d[["effective_date"]].rename(columns={"effective_date": "last_div_date"}),
+        left_on="date",
+        right_on="last_div_date",
+        direction="backward",
+    )
+    out_sorted["last_div_date"] = last_div["last_div_date"]
+
+    # TTM dividend sum: O(N*M) is fine (N~3k, M~tens)
+    eff_dates = d["effective_date"].values
+    eff_values = d["value"].values.astype(float)
+
+    def _ttm_sum(row_date: pd.Timestamp) -> float:
+        if pd.isna(row_date):
+            return 0.0
+        lo = row_date - pd.Timedelta(days=365)
+        mask = (eff_dates > np.datetime64(lo)) & (eff_dates <= np.datetime64(row_date))
+        return float(eff_values[mask].sum())
+
+    out_sorted["ttm_div"] = out_sorted["date"].apply(_ttm_sum)
+
+    out_sorted["div_yield_ttm"] = out_sorted["ttm_div"] / (out_sorted["CLOSE"] + 1e-9)
+    out_sorted["div_yield_ttm"] = out_sorted["div_yield_ttm"].clip(0.0, 0.30)
+
+    days_since = (out_sorted["date"] - out_sorted["last_div_date"]).dt.days
+    days_since = days_since.fillna(365.0).clip(0, 365)
+    out_sorted["days_since_last_div"] = (days_since / 365.0).astype(float)
+
+    out_sorted["div_yield_is_missing"] = out_sorted["last_div_date"].isna().astype(int)
+    out_sorted = out_sorted.drop(columns=["last_div_date", "ttm_div"], errors="ignore")
+    return out_sorted.set_index("date")
 
 
 # ── Macro data ──────────────────────────────────────────────────────────────
@@ -272,6 +396,22 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
     macro_df = fetch_macro_data(str(CFG["START"]), str(CFG["END"]))
     macro_cols = list(macro_df.columns) if not macro_df.empty else []
 
+    # Load dividend history once (per ticker).
+    use_div_fund = bool(CFG.get("USE_DIVIDEND_FEATURES", True))
+    div_map: Dict[str, pd.DataFrame] = {}
+    if use_div_fund:
+        print("\n=== LOADING DIVIDEND HISTORY (MOEX ISS) ===")
+        for secid in CFG["TICKERS"]:
+            d = fetch_dividends_moex(secid)
+            div_map[str(secid)] = d
+            if d is not None and not d.empty:
+                print(
+                    f"  {secid}: {len(d)} records, "
+                    f"range=[{d['registryclosedate'].min().date()} .. {d['registryclosedate'].max().date()}]"
+                )
+            else:
+                print(f"  {secid}: no dividend data")
+
     rows: List[pd.DataFrame] = []
     for secid in CFG["TICKERS"]:
         print(f"Loading {secid}...")
@@ -282,6 +422,14 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
             continue
 
         df_feat = build_features_one(df, secid=secid)
+
+        # Attach dividend fundamentals (past-only)
+        if use_div_fund:
+            df_feat = add_dividend_features_past_only(
+                df_feat,
+                div_map.get(str(secid), pd.DataFrame()),
+                lag_days=int(CFG.get("DIV_LAG_DAYS", 1)),
+            )
 
         # Merge macro features by date index (ffill/bfill to cover missing macro dates).
         if not macro_df.empty:
@@ -334,7 +482,8 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
         "price_pos_20",
         "volatility_20",
     ]
-    feature_cols = technical_cols + macro_cols
+    fundamental_cols = ["div_yield_ttm", "days_since_last_div", "div_yield_is_missing"] if use_div_fund else []
+    feature_cols = technical_cols + fundamental_cols + macro_cols
 
     # NOTE: technical features must exist; macro features are optional (filled with zeros
     # if the macro series failed to load).
@@ -360,7 +509,15 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
         f"\nMulti-ticker dataset: X={X.shape}, pos_rate={y.mean():.3%}, tickers={sorted(set(secids))}"
     )
     print(f"Features ({len(feature_cols)}): {feature_cols}")
-    print(f"  Technical: {len(technical_cols)} | Macro: {len(macro_cols)}")
+    print(f"  Technical: {len(technical_cols)} | Fundamental: {len(fundamental_cols)} | Macro: {len(macro_cols)}")
+
+    if use_div_fund and "div_yield_is_missing" in full.columns:
+        print("\n=== FUNDAMENTAL COVERAGE BY TICKER (dividends) ===")
+        for sec in sorted(full["secid"].astype(str).unique()):
+            m = full["secid"].astype(str) == str(sec)
+            coverage = float((full.loc[m, "div_yield_is_missing"] == 0).mean())
+            avg_yield = float(full.loc[m & (full["div_yield_is_missing"] == 0), "div_yield_ttm"].mean()) if (m.any()) else float("nan")
+            print(f"  {sec}: coverage={coverage:.1%}, avg div_yield_ttm={avg_yield:.4f}")
     return (
         MultiDataset(X=X, y=y, fwd_ret=fwd_ret, dates=dates, secids=secids),
         feature_cols,

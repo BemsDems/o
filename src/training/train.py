@@ -133,6 +133,12 @@ def run_once(
             prob_test = apply_platt_calibrator(calibrator, prob_test)
 
             print(f"Applied Platt calibration on last {n_cal} VAL samples")
+            print(
+                "Calibrated prob means | "
+                f"train={prob_train.mean():.4f} "
+                f"val={prob_val.mean():.4f} "
+                f"test={prob_test.mean():.4f}"
+            )
         else:
             print(f"Skip Platt calibration: n_cal={n_cal}, classes={np.unique(y_val[-n_cal:])}")
 

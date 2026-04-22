@@ -5,7 +5,7 @@ import pandas as pd
 import tensorflow as tf
 from sklearn.preprocessing import RobustScaler
 
-from project.config import CFG, seed_everything
+from project.config import CFG, _set_seed
 from project.data_loader import MultiDataset, build_multi_ticker_dataset
 from project.diagnostics import feature_importance_proxy
 from project.metrics import evaluate_global, improved_backtest_per_ticker, per_ticker_metrics
@@ -73,7 +73,7 @@ def main() -> None:
         run_seed = base_seed + run_idx
         print(f"\n\n================ RUN {run_idx + 1}/{n_runs} | SEED={run_seed} ================")
 
-        seed_everything(run_seed)
+        _set_seed(run_seed)
         tf.keras.backend.clear_session()
 
         model = build_tcn_model((n_steps, n_feat))

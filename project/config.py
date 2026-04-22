@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+import os
+import random
 from typing import Any, Dict
 
 import numpy as np
@@ -27,6 +29,18 @@ CFG: Dict[str, Any] = {
 
 
 def seed_everything(seed: int | None = None) -> None:
+    """Backward-compatible seed setter.
+
+    Accepts an explicit seed so each run can use different initialization.
+    """
     s = int(CFG["SEED"]) if seed is None else int(seed)
+    _set_seed(s)
+
+
+def _set_seed(seed: int) -> None:
+    """Set all relevant RNG seeds for reproducible (but controllable) runs."""
+    s = int(seed)
+    os.environ["PYTHONHASHSEED"] = str(s)
+    random.seed(s)
     np.random.seed(s)
     tf.random.set_seed(s)

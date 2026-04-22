@@ -5,6 +5,9 @@ import pandas as pd
 import tensorflow as tf
 from sklearn.preprocessing import RobustScaler
 
+import subprocess
+from pathlib import Path
+
 from project.config import CFG, _set_seed
 from project.data_loader import MultiDataset, build_multi_ticker_dataset
 from project.diagnostics import feature_importance_proxy
@@ -14,6 +17,32 @@ from project.sequences import make_sequences_multi_ticker, time_split_masks
 
 
 def main() -> None:
+    # --- Version / identity banner (helps detect stale Colab imports) ---
+    try:
+        repo_root = Path(__file__).resolve().parents[1]
+        git_sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(repo_root),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        git_sha = "unknown"
+
+    print("\n" + "=" * 72)
+    print("SONNET TCN RUN")
+    print(f"CODE: {__file__}")
+    print(f"GIT_SHA: {git_sha}")
+    print(
+        "CFG: "
+        f"USE_ENSEMBLE={CFG.get('USE_ENSEMBLE')} "
+        f"ENSEMBLE_SEEDS={CFG.get('ENSEMBLE_SEEDS')} "
+        f"DROPOUT={CFG.get('DROPOUT')} "
+        f"ES_PATIENCE={CFG.get('ES_PATIENCE')} "
+        f"ES_MIN_DELTA={CFG.get('ES_MIN_DELTA')}"
+    )
+    print("=" * 72 + "\n")
+
     # Build dataset ONCE (deterministic), then run multiple training seeds.
     ds, feature_cols = build_multi_ticker_dataset()
 

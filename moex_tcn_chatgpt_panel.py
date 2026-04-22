@@ -66,6 +66,20 @@ if __name__ == "__main__":
                 print(f"RUN_DIR: {run_dir.resolve()}")
                 print(f"LOG_PATH: {log_path.resolve()}")
                 print(f"PANEL TICKERS: {CFG.get('TICKERS')}")
+                try:
+                    import subprocess
+
+                    git_sha = subprocess.check_output(
+                        ["git", "rev-parse", "--short", "HEAD"],
+                        cwd="/content/o",
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                    ).strip()
+                except Exception:
+                    git_sha = "unknown"
+
+                print(f"GIT_SHA: {git_sha}")
+                print(f"CODE: {__file__}")
 
                 prepared = prepare_dataset_once_panel()
                 save_prepared_snapshot(run_dir, prepared, CFG)

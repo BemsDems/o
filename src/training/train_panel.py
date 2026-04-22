@@ -117,6 +117,16 @@ def run_once_panel(
         prob_val = 1 - prob_val
         prob_test = 1 - prob_test
 
+    # Keep raw probabilities for ranking/trading. We'll optionally create
+    # calibrated probabilities for probability-quality metrics.
+    prob_train_raw = prob_train.copy()
+    prob_val_raw = prob_val.copy()
+    prob_test_raw = prob_test.copy()
+
+    prob_train_cal = prob_train.copy()
+    prob_val_cal = prob_val.copy()
+    prob_test_cal = prob_test.copy()
+
     # Optional Platt scaling on the tail of VAL (no TEST leakage).
     if bool(CFG.get("USE_PLATT_CALIBRATION", True)):
         n_cal = max(
@@ -128,27 +138,35 @@ def run_once_panel(
         if n_cal >= 10 and len(np.unique(y_val[-n_cal:])) > 1:
             calibrator = fit_platt_calibrator(
                 y_val[-n_cal:],
-                prob_val[-n_cal:],
+                prob_val_raw[-n_cal:],
             )
 
-            prob_train = apply_platt_calibrator(calibrator, prob_train)
-            prob_val = apply_platt_calibrator(calibrator, prob_val)
-            prob_test = apply_platt_calibrator(calibrator, prob_test)
+            prob_train_cal = apply_platt_calibrator(calibrator, prob_train_raw)
+            prob_val_cal = apply_platt_calibrator(calibrator, prob_val_raw)
+            prob_test_cal = apply_platt_calibrator(calibrator, prob_test_raw)
 
             print(f"Applied Platt calibration on last {n_cal} VAL samples")
             print(
+                "Raw prob means | "
+                f"train={prob_train_raw.mean():.4f} "
+                f"val={prob_val_raw.mean():.4f} "
+                f"test={prob_test_raw.mean():.4f}"
+            )
+            print(
                 "Calibrated prob means | "
-                f"train={prob_train.mean():.4f} "
-                f"val={prob_val.mean():.4f} "
-                f"test={prob_test.mean():.4f}"
+                f"train={prob_train_cal.mean():.4f} "
+                f"val={prob_val_cal.mean():.4f} "
+                f"test={prob_test_cal.mean():.4f}"
             )
         else:
             print(f"Skip Platt calibration: n_cal={n_cal}, classes={np.unique(y_val[-n_cal:])}")
 
     if SHOW_TRAIN_VAL_DIAG:
-        prob_summary("TRAIN", y_train, prob_train)
-        prob_summary("VAL", y_val, prob_val)
-    prob_summary("TEST", y_test, prob_test)
+        prob_summary("TRAIN", y_train, prob_train_raw)
+        prob_summary("VAL", y_val, prob_val_raw)
+
+    prob_summary("TEST RAW", y_test, prob_test_raw)
+    prob_summary("TEST CAL", y_test, prob_test_cal)
 
     fret_train = future_ret_w[prepared["train_mask"]]
     fret_val = future_ret_w[prepared["val_mask"]]
@@ -163,14 +181,14 @@ def run_once_panel(
     X_test_last = X_test[:, -1, :]
     drift_report_features(X_train_last, X_test_last, prepared["FEATURES"], top_k=12)
 
-    p_psi = psi_1d(prob_train, prob_test, n_bins=10)
+    p_psi = psi_1d(prob_train_cal, prob_test_cal, n_bins=10)
     print("\n" + "=" * 70)
     print(f"PROB DRIFT PSI(train→test): {p_psi:.3f} (if >0.25 — strong shift)")
     print("=" * 70)
 
     thr_f1, thr_pnl, thr_tab = pick_threshold_on_val_panel(
         y_val,
-        prob_val,
+        prob_val_raw,
         fret_val,
         dw[val_mask],
         group_w[val_mask],
@@ -179,22 +197,22 @@ def run_once_panel(
     )
 
     hist_info = history_summary(history)
-    test_metrics = compact_prob_metrics(y_test, prob_test)
+    test_metrics = compact_prob_metrics(y_test, prob_test_cal)
     test_metrics["pr_auc"] = (
-        float(average_precision_score(y_test, prob_test)) if len(np.unique(y_test)) > 1 else float("nan")
+        float(average_precision_score(y_test, prob_test_cal)) if len(np.unique(y_test)) > 1 else float("nan")
     )
     test_metrics["pr_auc_lift"] = (
         float(test_metrics["pr_auc"] - test_metrics["pos_rate"]) if np.isfinite(test_metrics["pr_auc"]) else float("nan")
     )
 
-    dec_test = make_decile_table(y_test, prob_test, future_ret=fret_test, n_bins=10)
+    dec_test = make_decile_table(y_test, prob_test_raw, future_ret=fret_test, n_bins=10)
     dec_spread = float(dec_test.iloc[-1]["buy_rate"] - dec_test.iloc[0]["buy_rate"]) if len(dec_test) >= 2 else float("nan")
 
     _dates_test = dw[test_mask]
     _tickers_test = group_w[test_mask]
 
     bt_f1_tbl = panel_backtest_by_ticker(
-        prob_test,
+        prob_test_raw,
         _dates_test,
         _tickers_test,
         px_map,
@@ -203,7 +221,7 @@ def run_once_panel(
         float(CFG["FEE"]),
     )
     bt_pnl_tbl = panel_backtest_by_ticker(
-        prob_test,
+        prob_test_raw,
         _dates_test,
         _tickers_test,
         px_map,
@@ -251,9 +269,14 @@ def run_once_panel(
     if not bt_pnl_tbl.empty:
         print("\nPer-ticker backtest @ thr_pnl:")
         print(bt_pnl_tbl.to_string(index=False))
+
+        print("\nPer-ticker backtest @ thr_pnl (traded only):")
+        traded_mask = bt_pnl_tbl["n_trades"] > 0
+        print(bt_pnl_tbl[traded_mask].to_string(index=False) if bool(traded_mask.any()) else "No trades")
     print("=" * 70)
 
-    alpha_thr_pnl = float(bt_pnl_tbl["alpha"].mean()) if not bt_pnl_tbl.empty else 0.0
+    bt_pnl_tbl_eff = bt_pnl_tbl[bt_pnl_tbl["n_trades"] > 0].copy() if not bt_pnl_tbl.empty else bt_pnl_tbl
+    alpha_thr_pnl = float(bt_pnl_tbl_eff["alpha"].mean()) if not bt_pnl_tbl_eff.empty else 0.0
     n_trades_thr_pnl = int(bt_pnl_tbl["n_trades"].sum()) if not bt_pnl_tbl.empty else 0
 
     if bool(CFG.get("SAVE_PER_SEED_TABLES", True)) and run_dir is not None:

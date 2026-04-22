@@ -24,6 +24,12 @@ class TeeStream:
         for s in self.streams:
             s.flush()
 
+    def close(self):
+        # Some context managers expect .close() to exist.
+        for s in self.streams:
+            if hasattr(s, "flush"):
+                s.flush()
+
 
 def _jsonable(obj):
     if isinstance(obj, (np.integer, np.floating)):
@@ -181,4 +187,3 @@ def download_artifacts_if_needed(run_dir: Path, cfg: dict) -> Optional[Path]:
 
     print("Нет файлов для скачивания.")
     return None
-

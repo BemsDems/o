@@ -40,6 +40,11 @@ CFG: Dict[str, Any] = {
     # Multi-seed evaluation
     "RUN_SEEDS": [11, 21, 31, 41, 51],
 
+    # Probability calibration (post-processing)
+    "USE_PLATT_CALIBRATION": True,
+    "CALIB_VAL_TAIL_FRAC": 0.50,
+    "CALIB_VAL_MIN_SAMPLES": 120,
+
     # Feature clipping (robustness against outliers)
     "CLIP_Q": 0.005,
 

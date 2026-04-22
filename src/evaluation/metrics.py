@@ -5,6 +5,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from sklearn.linear_model import LogisticRegression
+
 from sklearn.metrics import (
     balanced_accuracy_score,
     brier_score_loss,
@@ -32,6 +34,26 @@ def ece_score(y_true: np.ndarray, prob: np.ndarray, n_bins: int = 10) -> float:
         conf = float(prob[mask].mean())
         ece += float(mask.mean()) * abs(acc - conf)
     return float(ece)
+
+
+def fit_platt_calibrator(y_true: np.ndarray, prob: np.ndarray) -> LogisticRegression:
+    """Fit Platt scaling calibrator on logits.
+
+    Uses logistic regression on the logit(p) so we calibrate probabilities
+    without changing rank ordering too aggressively.
+    """
+    p = np.clip(prob.astype(float), 1e-6, 1 - 1e-6)
+    x = np.log(p / (1 - p)).reshape(-1, 1)
+
+    clf = LogisticRegression(solver="lbfgs", max_iter=1000)
+    clf.fit(x, y_true.astype(int))
+    return clf
+
+
+def apply_platt_calibrator(calibrator: LogisticRegression, prob: np.ndarray) -> np.ndarray:
+    p = np.clip(prob.astype(float), 1e-6, 1 - 1e-6)
+    x = np.log(p / (1 - p)).reshape(-1, 1)
+    return calibrator.predict_proba(x)[:, 1]
 
 
 def history_summary(history) -> dict:

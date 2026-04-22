@@ -154,11 +154,10 @@ if __name__ == "__main__":
             write_text(run_dir / "error_log.txt", err)
             raise
 
-    # Download must run outside redirected stdout/stderr block (Colab quirk)
+    # Auto-zip only (works reliably for both %run and !python in Colab).
+    # Downloading via google.colab.files.download is intentionally moved to a separate cell.
     if CFG.get("AUTO_DOWNLOAD_ARTIFACTS", False):
         try:
-            from google.colab import files
-
             zip_path = shutil.make_archive(
                 str(run_dir),
                 "zip",
@@ -166,8 +165,8 @@ if __name__ == "__main__":
                 base_dir=run_dir.name,
             )
             print(f"ZIP created: {zip_path}")
-            files.download(zip_path)
+            write_text(run_dir / "zip_path.txt", zip_path + "\n")
         except Exception as e:
-            err_msg = f"Auto-download failed: {type(e).__name__}: {e}"
+            err_msg = f"Auto-zip failed: {type(e).__name__}: {e}"
             print(err_msg)
             write_text(run_dir / "download_error.txt", err_msg + "\n")

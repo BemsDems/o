@@ -22,15 +22,14 @@ CFG: Dict[str, Any] = {
     "EPOCHS": 100,
     "LR": 3e-4,
     "SEED": 42,
-    # For quick diagnostics runs.
-    "N_RUNS": 1,
+    "N_RUNS": 3,
     "FEE": 0.001,
     "EXTENDED_DIAGNOSTICS": True,
 }
 
 
 # Human-readable fingerprint printed at runtime to detect stale Colab imports.
-CODE_FINGERPRINT = "sonnet-baseline-shuffle-true-no-classweight"
+CODE_FINGERPRINT = "sonnet-v1: shuffle=True, class_weight=None, per-run seed"
 
 
 def seed_everything(seed: int | None = None) -> None:

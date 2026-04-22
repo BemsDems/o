@@ -12,6 +12,9 @@ from typing import Any, Dict, Optional
 
 CFG: Dict[str, Any] = {
     "TICKER": "GAZP",
+    # Multi-ticker (panel) mode: used by moex_tcn_chatgpt_panel.py.
+    # Keep TICKER as the primary ticker for run naming / artifacts.
+    "TICKERS": ["GAZP", "SBER", "LKOH", "ROSN"],
     "START": "2015-01-01",
     "END": "2025-12-31",
 

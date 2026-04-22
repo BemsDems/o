@@ -93,13 +93,13 @@ def add_dividend_past_only_features(df: pd.DataFrame, div: pd.DataFrame) -> pd.D
 
 
 def build_features(
-    stock: pd.DataFrame,
+    stock_df: pd.DataFrame,
     usd: pd.DataFrame,
     imo: pd.DataFrame,
     key_rate: pd.DataFrame,
     divs: pd.DataFrame,
 ) -> pd.DataFrame:
-    df = stock.copy()
+    df = stock_df.copy()
 
     # returns
     df["ret_1"] = df["Close"].pct_change(1)
@@ -142,7 +142,7 @@ def build_features(
     df["vol_ratio_5_20"] = df["Volume"].rolling(5).mean() / (v20 + 1e-12)
     df["vol_spike"] = (df["Volume"] > (v20 + 2 * df["Volume"].rolling(20).std())).astype(int)
 
-    # Market / FX context (align to stock calendar first)
+    # Market / FX context (align to current stock calendar)
     usd_close = usd["Close"].reindex(df.index).ffill()
     imo_close = imo["Close"].reindex(df.index).ffill()
 
@@ -183,4 +183,3 @@ def build_features(
 
     df = df.dropna().copy()
     return df
-

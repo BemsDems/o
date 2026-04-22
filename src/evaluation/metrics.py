@@ -14,7 +14,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from src.evaluation.backtest import non_overlap_pnl
+from src.evaluation.backtest import non_overlap_pnl, non_overlap_pnl_panel
 
 
 def ece_score(y_true: np.ndarray, prob: np.ndarray, n_bins: int = 10) -> float:
@@ -163,3 +163,68 @@ def pick_threshold_on_val(
 
     return float(thr_f1), float(thr_pnl), tab
 
+
+def pick_threshold_on_val_panel(
+    y_true_val: np.ndarray,
+    prob_val: np.ndarray,
+    future_ret_val: np.ndarray,
+    dates_val: np.ndarray,
+    tickers_val: np.ndarray,
+    horizon: int,
+    fee: float,
+    thresholds=None,
+):
+    """Threshold search for a panel dataset.
+
+    Uses non_overlap_pnl_panel() so trades are evaluated independently per ticker.
+    """
+    if thresholds is None:
+        thresholds = np.arange(0.10, 0.91, 0.02)
+
+    rows = []
+    for thr in thresholds:
+        pred = (prob_val >= thr).astype(int)
+
+        f1_1 = f1_score(y_true_val, pred, pos_label=1, zero_division=0)
+        bal = balanced_accuracy_score(y_true_val, pred)
+        mcc = matthews_corrcoef(y_true_val, pred) if len(np.unique(pred)) > 1 else 0.0
+
+        avg_pnl, n_tr = non_overlap_pnl_panel(
+            pred,
+            future_ret_val,
+            dates_val,
+            tickers_val,
+            horizon,
+            fee,
+        )
+
+        MIN_TRADES = 15
+        MIN_BUY_RATE = 0.05
+        MAX_BUY_RATE = 0.35
+        feasible = (n_tr >= MIN_TRADES) and (MIN_BUY_RATE <= pred.mean() <= MAX_BUY_RATE)
+        if not feasible:
+            avg_pnl = -1e9
+
+        rows.append(
+            {
+                "thr": float(thr),
+                "f1_class1": float(f1_1),
+                "balanced_acc": float(bal),
+                "mcc": float(mcc),
+                "share_buy": float(pred.mean()),
+                "avg_trade_ret_nonoverlap": float(avg_pnl),
+                "n_trades_nonoverlap": int(n_tr),
+            }
+        )
+
+    tab = pd.DataFrame(rows).sort_values("thr").reset_index(drop=True)
+    tab_feas = tab[tab["avg_trade_ret_nonoverlap"] > -1e8].copy()
+
+    if tab_feas.empty:
+        thr_f1 = 0.50
+        thr_pnl = 0.50
+    else:
+        thr_f1 = float(tab_feas.iloc[tab_feas["f1_class1"].values.argmax()]["thr"])
+        thr_pnl = float(tab_feas.iloc[tab_feas["avg_trade_ret_nonoverlap"].values.argmax()]["thr"])
+
+    return float(thr_f1), float(thr_pnl), tab

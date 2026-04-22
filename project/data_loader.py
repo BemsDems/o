@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -34,6 +34,118 @@ def fetch_moex_candles(secid: str, start: str, end: str | None) -> pd.DataFrame:
     return df
 
 
+# ── Macro data ──────────────────────────────────────────────────────────────
+
+
+def _fetch_macro_close(secid: str, start: str, end: str) -> pd.Series:
+    """Fetch daily close for a macro instrument.
+
+    Returns a Series indexed by date (begin).
+    """
+    try:
+        raw = Ticker(secid).candles(start=str(start), end=str(end), period="1D")
+        df = pd.DataFrame(raw)
+        if df.empty:
+            print(f"  [macro] {secid}: empty")
+            return pd.Series(dtype=float)
+
+        df["begin"] = pd.to_datetime(df["begin"], errors="coerce")
+        df = df.dropna(subset=["begin"]).drop_duplicates(subset=["begin"]).set_index("begin").sort_index()
+        if "close" not in df.columns:
+            print(f"  [macro] {secid}: no 'close' column")
+            return pd.Series(dtype=float)
+
+        return df["close"].astype(float)
+    except Exception as e:
+        print(f"  [macro] {secid}: fetch failed ({type(e).__name__}: {e})")
+        return pd.Series(dtype=float)
+
+
+def fetch_macro_data(start: str, end: str) -> pd.DataFrame:
+    """Fetch macro instruments (USD/RUB, Brent proxy, IMOEX) and compute features.
+
+    Designed to be called once, then joined to each stock's feature frame by date.
+    Produces 8 macro features:
+      usdrub_logret_1, usdrub_logret_5, usdrub_volatility_20,
+      brent_logret_1, brent_logret_5,
+      imoex_logret_1, imoex_logret_5, imoex_logret_20.
+    """
+    print("\n=== LOADING MACRO DATA ===")
+
+    # 1) Fetch closes with fallbacks.
+    print("Loading USD/RUB (USD000UTSTOM)...")
+    usdrub = _fetch_macro_close("USD000UTSTOM", start, end)
+
+    # Brent on MOEX can be represented by different secids depending on the period.
+    # We'll try a few common tickers and keep the first non-empty.
+    print("Loading Brent proxy...")
+    brent = pd.Series(dtype=float)
+    for secid in ("BR", "BRJ4", "BRM4", "BRQ4", "BRZ4"):
+        brent = _fetch_macro_close(secid, start, end)
+        if not brent.empty:
+            break
+
+    print("Loading IMOEX...")
+    imoex = _fetch_macro_close("IMOEX", start, end)
+
+    # 2) Build aligned close table (ffill/bfill), allowing missing series.
+    close_tbl = pd.DataFrame(index=pd.Index([], name="begin"))
+    if not usdrub.empty:
+        close_tbl["usdrub_close"] = usdrub
+    if not brent.empty:
+        close_tbl["brent_close"] = brent
+    if not imoex.empty:
+        close_tbl["imoex_close"] = imoex
+
+    if close_tbl.empty:
+        print("  [macro] WARNING: no macro series loaded; macro features will be zeros")
+        return pd.DataFrame()
+
+    close_tbl = close_tbl.sort_index().ffill().bfill()
+
+    # 3) Derived features
+    out = pd.DataFrame(index=close_tbl.index)
+
+    # USD/RUB
+    if "usdrub_close" in close_tbl.columns:
+        c = close_tbl["usdrub_close"]
+        for lag in (1, 5):
+            ratio = (c / c.shift(lag)).clip(0.5, 2.0)
+            out[f"usdrub_logret_{lag}"] = np.log(ratio).replace([np.inf, -np.inf], np.nan)
+        out["usdrub_volatility_20"] = out["usdrub_logret_1"].rolling(20).std().clip(0.0, 0.1)
+    else:
+        out["usdrub_logret_1"] = 0.0
+        out["usdrub_logret_5"] = 0.0
+        out["usdrub_volatility_20"] = 0.0
+
+    # Brent
+    if "brent_close" in close_tbl.columns:
+        c = close_tbl["brent_close"]
+        for lag in (1, 5):
+            ratio = (c / c.shift(lag)).clip(0.5, 2.0)
+            out[f"brent_logret_{lag}"] = np.log(ratio).replace([np.inf, -np.inf], np.nan)
+    else:
+        out["brent_logret_1"] = 0.0
+        out["brent_logret_5"] = 0.0
+
+    # IMOEX
+    if "imoex_close" in close_tbl.columns:
+        c = close_tbl["imoex_close"]
+        for lag in (1, 5, 20):
+            ratio = (c / c.shift(lag)).clip(0.5, 2.0)
+            out[f"imoex_logret_{lag}"] = np.log(ratio).replace([np.inf, -np.inf], np.nan)
+    else:
+        out["imoex_logret_1"] = 0.0
+        out["imoex_logret_5"] = 0.0
+        out["imoex_logret_20"] = 0.0
+
+    out = out.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0.0)
+
+    print(f"  [macro] features: {list(out.columns)}")
+    print(f"  [macro] date range: {out.index.min()} — {out.index.max()}")
+    return out
+
+
 def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     delta = close.diff()
     gain = delta.where(delta > 0, 0.0).rolling(period).mean()
@@ -43,7 +155,7 @@ def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
 
 
 def build_features_one(df: pd.DataFrame, *, secid: str = "") -> pd.DataFrame:
-    """Feature engineering — 20 features (15 base + 5 new)."""
+    """Feature engineering — technical indicators for a single ticker."""
     out = df.copy()
 
     n0 = len(out)
@@ -158,6 +270,10 @@ class MultiDataset:
 
 
 def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
+    # Load macro series once, then join to each ticker by date.
+    macro_df = fetch_macro_data(str(CFG["START"]), str(CFG["END"]))
+    macro_cols = list(macro_df.columns) if not macro_df.empty else []
+
     rows: List[pd.DataFrame] = []
     for secid in CFG["TICKERS"]:
         print(f"Loading {secid}...")
@@ -168,6 +284,13 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
             continue
 
         df_feat = build_features_one(df, secid=secid)
+
+        # Merge macro features by date index (ffill/bfill to cover missing macro dates).
+        if not macro_df.empty:
+            df_feat = df_feat.join(macro_df, how="left")
+            for col in macro_cols:
+                df_feat[col] = df_feat[col].ffill().bfill().fillna(0.0)
+            print(f"  after macro merge: {len(df_feat)} rows, macro cols={len(macro_cols)}")
 
         min_rows = max(250, int(CFG["SEQ_LEN"]) + int(CFG["HORIZON"]) + 50)
         if len(df_feat) < min_rows:
@@ -196,7 +319,7 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
 
     full = pd.concat(rows, axis=0).sort_values(["secid", "date"]).reset_index(drop=True)
 
-    feature_cols = [
+    technical_cols = [
         "logret_1",
         "logret_2",
         "logret_3",
@@ -213,15 +336,21 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
         "price_pos_20",
         "volatility_20",
     ]
-    # NOTE: do not silently drop features — it leads to confusing logs like
-    # "Features (9)" when you expected 15. If a feature is missing, fail fast.
-    missing = [c for c in feature_cols if c not in full.columns]
-    if missing:
+    feature_cols = technical_cols + macro_cols
+
+    # NOTE: technical features must exist; macro features are optional (filled with zeros
+    # if the macro series failed to load).
+    missing_tech = [c for c in technical_cols if c not in full.columns]
+    if missing_tech:
         raise RuntimeError(
-            "Missing expected feature columns. "
-            f"Expected={len(feature_cols)}, missing={missing}. "
+            "Missing expected technical feature columns. "
+            f"Expected={len(technical_cols)}, missing={missing_tech}. "
             "Check build_features_one() and upstream data columns."
         )
+
+    for c in macro_cols:
+        if c not in full.columns:
+            full[c] = 0.0
 
     X = full[feature_cols].values
     y = full["target"].astype(int).values
@@ -233,6 +362,7 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
         f"\nMulti-ticker dataset: X={X.shape}, pos_rate={y.mean():.3%}, tickers={sorted(set(secids))}"
     )
     print(f"Features ({len(feature_cols)}): {feature_cols}")
+    print(f"  Technical: {len(technical_cols)} | Macro: {len(macro_cols)}")
     return (
         MultiDataset(X=X, y=y, fwd_ret=fwd_ret, dates=dates, secids=secids),
         feature_cols,

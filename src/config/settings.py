@@ -51,6 +51,10 @@ CFG: Dict[str, Any] = {
     # Current practical baseline: no dividends
     "USE_DIVIDENDS": False,
 
+    # Fundamentals (optional; fetched from Smart-Lab and attached past-only)
+    "USE_FUNDAMENTALS": True,
+    "FUND_LAG_DAYS": 1,
+
     # Save model/scaler only for single-seed runs
     "SAVE_SINGLE_RUN_ARTIFACTS": False,
 
@@ -75,6 +79,26 @@ BASE_FEATURES = [
     "imoex_ret_1", "imoex_ret_5", "imoex_ret_20",
     "stock_vs_imoex_5",
     "key_rate_chg", "rate_rising",
+]
+
+
+# Fundamental features (single source of truth)
+FUND_FEATURES = [
+    "roe",
+    "pb_ratio",
+    "net_margin",
+    "value_quality",
+    "log_revenue",
+    "log_net_income",
+    "eps",
+
+    "roe_is_missing",
+    "pb_ratio_is_missing",
+    "net_margin_is_missing",
+    "value_quality_is_missing",
+    "log_revenue_is_missing",
+    "log_net_income_is_missing",
+    "eps_is_missing",
 ]
 
 

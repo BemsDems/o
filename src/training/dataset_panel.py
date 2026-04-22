@@ -8,8 +8,14 @@ import pandas as pd
 from sklearn.preprocessing import RobustScaler
 from sklearn.utils.class_weight import compute_class_weight
 
-from src.config.settings import CFG, BASE_FEATURES
+from src.config.settings import CFG, BASE_FEATURES, FUND_FEATURES
 from src.data.loaders import cbr_key_rate_range, load_candles_moexalgo, moex_iss_dividends
+from src.data.fundamentals import (
+    add_fundamental_features_past_only,
+    combine_fundamental_sources,
+    fetch_smartlab_financials,
+    normalize_fundamentals,
+)
 from src.features.engineering import build_features
 from src.features.target import add_target, make_windows_grouped
 
@@ -52,6 +58,32 @@ def prepare_dataset_once_panel() -> Dict[str, Any]:
             divs = pd.DataFrame(columns=["date", "dividend_rub", "currency"])
 
         feat_i = build_features(px, usd, imo, key_rate, divs)
+
+        # Fundamentals (past-only attachment, no leakage)
+        if CFG.get("USE_FUNDAMENTALS", False):
+            fund_msfo = fetch_smartlab_financials(
+                ticker=ticker,
+                report_type="MSFO",
+                freq="q",
+            )
+            fund_rsbu = fetch_smartlab_financials(
+                ticker=ticker,
+                report_type="RSBU",
+                freq="q",
+            )
+
+            fund = combine_fundamental_sources(
+                normalize_fundamentals(fund_msfo),
+                normalize_fundamentals(fund_rsbu),
+            )
+
+            feat_i = add_fundamental_features_past_only(
+                feat_i,
+                fund,
+                ticker=ticker,
+                lag_days=int(CFG.get("FUND_LAG_DAYS", 1)),
+            )
+
         feat_i = add_target(feat_i, int(CFG["HORIZON"]), float(CFG["THR_MOVE"]))
         if feat_i.empty:
             print(f"Skip {ticker}: empty feature dataset after target")
@@ -82,17 +114,6 @@ def prepare_dataset_once_panel() -> Dict[str, Any]:
         .to_string()
     )
 
-    # Ticker identity features (one-hot). This is critical for a multi-ticker
-    # classifier so the model can learn per-ticker baselines/regimes.
-    ticker_dummies = pd.get_dummies(feat["ticker"], prefix="ticker", dtype=float)
-    feat = pd.concat([feat, ticker_dummies], axis=1)
-
-    ticker_features = sorted(ticker_dummies.columns.tolist())
-    FEATURES = [c for c in BASE_FEATURES if c in feat.columns] + ticker_features
-    print("\nSELECTED FEATURES:")
-    print(FEATURES)
-    print(f"Признаков используется: {len(FEATURES)}")
-
     unique_dates = np.array(sorted(feat["date"].unique()))
     n_dates = int(len(unique_dates))
     n_train = int(n_dates * float(CFG["TRAIN_FRAC"]))
@@ -107,6 +128,57 @@ def prepare_dataset_once_panel() -> Dict[str, Any]:
         "train",
         np.where(feat["date"].isin(val_dates), "val", "test"),
     )
+
+    # Ticker identity features (one-hot). This is critical for a multi-ticker
+    # classifier so the model can learn per-ticker baselines/regimes.
+    ticker_dummies = pd.get_dummies(feat["ticker"], prefix="ticker", dtype=float)
+    feat = pd.concat([feat, ticker_dummies], axis=1)
+
+    fund_core_cols = [
+        "roe",
+        "pb_ratio",
+        "net_margin",
+        "value_quality",
+        "log_revenue",
+        "log_net_income",
+        "eps",
+    ]
+    present_fund_core = [c for c in fund_core_cols if c in feat.columns]
+
+    if present_fund_core:
+        print("\nFUNDAMENTAL COVERAGE BY TICKER (non-null share):")
+        cov = feat.groupby("ticker")[present_fund_core].apply(lambda x: x.notna().mean())
+        print(cov.to_string())
+
+        # Make sure fund columns are numeric and fill NaNs with TRAIN median (past-only).
+        for c in present_fund_core:
+            feat[c] = pd.to_numeric(feat[c], errors="coerce")
+            feat[c] = feat[c].replace([np.inf, -np.inf], np.nan)
+
+            med = feat.loc[feat["split"] == "train", c].median()
+            if pd.isna(med):
+                med = 0.0
+            feat[c] = feat[c].fillna(med)
+
+    ticker_features = sorted(ticker_dummies.columns.tolist())
+    fund_features_present = [c for c in FUND_FEATURES if c in feat.columns]
+
+    FEATURES = (
+        [c for c in BASE_FEATURES if c in feat.columns]
+        + fund_features_present
+        + ticker_features
+    )
+    print("\nSELECTED FEATURES:")
+    print(FEATURES)
+    print(f"Признаков используется: {len(FEATURES)}")
+    print(f"Fundamental features added: {fund_features_present}")
+    print(f"Ticker features added: {ticker_features}")
+
+    if CFG.get("USE_FUNDAMENTALS", False):
+        expected_fund = {"roe", "pb_ratio", "net_margin", "value_quality"}
+        missing_fund = sorted(expected_fund - set(FEATURES))
+        if missing_fund:
+            print(f"WARNING: some expected fundamental features are missing: {missing_fund}")
 
     scaler = RobustScaler()
 

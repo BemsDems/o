@@ -284,11 +284,21 @@ def add_fundamental_features_past_only(
     ticker: str,
     lag_days: int = 1,
 ) -> pd.DataFrame:
-    """Attach fundamentals to daily candles WITHOUT leakage."""
+    """Attach fundamentals to daily candles WITHOUT leakage.
 
-    out = price_df.copy().sort_index()
-    out = out.reset_index().rename(columns={out.columns[0]: "date"})
-    out["date"] = pd.to_datetime(out["date"])
+    Merge logic:
+    - fundamentals become effective only after publish_date (+ optional lag_days)
+    - merge_asof backward on effective_date
+    """
+
+    out = price_df.copy().sort_index().reset_index()
+
+    # first column after reset_index() is former datetime index
+    out = out.rename(columns={out.columns[0]: "date"})
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
+
+    if out["date"].isna().all():
+        raise ValueError("Price date column could not be parsed after reset_index()")
 
     if fund_df is None or fund_df.empty:
         return out.set_index("date")
@@ -304,6 +314,9 @@ def add_fundamental_features_past_only(
         f["effective_date"] = f["publish_date"] + pd.Timedelta(days=int(lag_days))
     else:
         f["effective_date"] = f["publish_date"]
+
+    f["effective_date"] = pd.to_datetime(f["effective_date"], errors="coerce")
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
 
     cols_keep = [
         "effective_date",
@@ -327,11 +340,47 @@ def add_fundamental_features_past_only(
 
     out = out.drop(columns=["effective_date"], errors="ignore")
 
+    # derived features
     if "roe" in out.columns and "pb_ratio" in out.columns:
         out["value_quality"] = out["roe"] / out["pb_ratio"].replace(0, np.nan)
+        out["value_quality"] = out["value_quality"].replace([np.inf, -np.inf], np.nan)
 
     if "net_income" in out.columns and "revenue" in out.columns:
         out["net_margin_calc"] = out["net_income"] / out["revenue"].replace(0, np.nan)
 
-    return out.set_index("date")
+    if "net_margin" not in out.columns:
+        out["net_margin"] = np.nan
+    if "net_margin_calc" in out.columns:
+        out["net_margin"] = out["net_margin"].where(out["net_margin"].notna(), out["net_margin_calc"])
 
+    if "revenue" in out.columns:
+        out["log_revenue"] = np.sign(out["revenue"]) * np.log1p(np.abs(out["revenue"]))
+    else:
+        out["log_revenue"] = np.nan
+
+    if "net_income" in out.columns:
+        out["log_net_income"] = np.sign(out["net_income"]) * np.log1p(np.abs(out["net_income"]))
+    else:
+        out["log_net_income"] = np.nan
+
+    fund_core_cols = [
+        "roe",
+        "pb_ratio",
+        "net_margin",
+        "value_quality",
+        "log_revenue",
+        "log_net_income",
+        "eps",
+    ]
+    for c in fund_core_cols:
+        if c not in out.columns:
+            out[c] = np.nan
+        out[f"{c}_is_missing"] = out[c].isna().astype(int)
+
+    if out["date"].dt.year.min() < 1990:
+        raise ValueError(
+            "Attached price dates look corrupted (<1990). "
+            "Check reset_index()/date parsing in add_fundamental_features_past_only()."
+        )
+
+    return out.set_index("date")

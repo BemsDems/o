@@ -8,7 +8,7 @@ from sklearn.preprocessing import RobustScaler
 import subprocess
 from pathlib import Path
 
-from project.config import CFG, _set_seed
+from project.config import CFG, CODE_FINGERPRINT, _set_seed
 from project.data_loader import MultiDataset, build_multi_ticker_dataset
 from project.diagnostics import feature_importance_proxy
 from project.metrics import evaluate_global, improved_backtest_per_ticker, per_ticker_metrics
@@ -33,14 +33,8 @@ def main() -> None:
     print("SONNET TCN RUN")
     print(f"CODE: {__file__}")
     print(f"GIT_SHA: {git_sha}")
-    print(
-        "CFG: "
-        f"USE_ENSEMBLE={CFG.get('USE_ENSEMBLE')} "
-        f"ENSEMBLE_SEEDS={CFG.get('ENSEMBLE_SEEDS')} "
-        f"DROPOUT={CFG.get('DROPOUT')} "
-        f"ES_PATIENCE={CFG.get('ES_PATIENCE')} "
-        f"ES_MIN_DELTA={CFG.get('ES_MIN_DELTA')}"
-    )
+    print(f"FINGERPRINT: {CODE_FINGERPRINT}")
+    print(f"CFG: SEED={CFG.get('SEED')} N_RUNS={CFG.get('N_RUNS')} EPOCHS={CFG.get('EPOCHS')} BATCH_SIZE={CFG.get('BATCH_SIZE')}")
     print("=" * 72 + "\n")
 
     # Build dataset ONCE (deterministic), then run multiple training seeds.
@@ -95,22 +89,12 @@ def main() -> None:
     print(f"Train: [{X_train.min():.2f}, {X_train.max():.2f}], NaN={np.isnan(X_train).any()}")
     print(f"y_train distribution: {np.bincount(y_train.astype(int))}")
 
-    use_ensemble = bool(CFG.get("USE_ENSEMBLE", False))
-    if use_ensemble:
-        seeds = [int(s) for s in (CFG.get("ENSEMBLE_SEEDS") or [])]
-        if not seeds:
-            seeds = [42, 43, 44, 45, 46]
-        print(f"\nUsing ensemble seeds: {seeds}")
-    else:
-        base_seed = int(CFG.get("SEED", 42))
-        n_runs = int(CFG.get("N_RUNS", 1))
-        seeds = [base_seed + i for i in range(n_runs)]
+    base_seed = int(CFG.get("SEED", 42))
+    n_runs = int(CFG.get("N_RUNS", 1))
 
-    prob_val_list = []
-    prob_test_list = []
-
-    for run_idx, run_seed in enumerate(seeds):
-        print(f"\n\n================ RUN {run_idx + 1}/{len(seeds)} | SEED={run_seed} ================")
+    for run_idx in range(n_runs):
+        run_seed = base_seed + run_idx
+        print(f"\n\n================ RUN {run_idx + 1}/{n_runs} | SEED={run_seed} ================")
 
         _set_seed(run_seed)
         tf.keras.backend.clear_session()
@@ -149,9 +133,6 @@ def main() -> None:
 
         y_prob_val = model.predict(X_val, verbose=0).ravel()
         y_prob = model.predict(X_test, verbose=0).ravel()
-
-        prob_val_list.append(y_prob_val)
-        prob_test_list.append(y_prob)
 
         print(
             f"\nVal prob: mean={y_prob_val.mean():.4f}, std={y_prob_val.std():.4f}, "
@@ -222,54 +203,7 @@ def main() -> None:
         )
         print(bt.to_string(index=False))
 
-    # Ensemble summary (average probabilities)
-    if use_ensemble and prob_test_list:
-        prob_val_ens = np.mean(np.vstack(prob_val_list), axis=0)
-        prob_test_ens = np.mean(np.vstack(prob_test_list), axis=0)
-
-        print("\n\n================ ENSEMBLE (mean probs) ================")
-        print(
-            f"Val prob: mean={prob_val_ens.mean():.4f}, std={prob_val_ens.std():.4f}, "
-            f"range=[{prob_val_ens.min():.4f}, {prob_val_ens.max():.4f}]"
-        )
-        print(
-            f"Test prob: mean={prob_test_ens.mean():.4f}, std={prob_test_ens.std():.4f}, "
-            f"range=[{prob_test_ens.min():.4f}, {prob_test_ens.max():.4f}]"
-        )
-
-        # Threshold search on ensemble VAL
-        print("\n=== THRESHOLD OPTIMIZATION (VAL, ENSEMBLE) ===")
-        best_thr, best_f1 = 0.5, 0.0
-        from sklearn.metrics import f1_score
-
-        for thr in np.arange(0.30, 0.85, 0.01):
-            pred = (prob_val_ens >= thr).astype(int)
-            if pred.sum() == 0:
-                continue
-            f1v = f1_score(y_val, pred, zero_division=0)
-            if f1v > best_f1:
-                best_f1, best_thr = float(f1v), float(thr)
-
-        print(f"Best threshold (ensemble): {best_thr:.2f} (F1={best_f1:.3f})")
-
-        print("\n=== FINAL RESULTS (ENSEMBLE) ===")
-        g = evaluate_global(y_test, prob_test_ens, thr=best_thr)
-        for k, v in g.items():
-            print(f" {k}: {v:.4f}")
-
-        print("\n=== PER-TICKER AUC (ENSEMBLE) ===")
-        print(per_ticker_metrics(y_test, prob_test_ens, secids_test).to_string(index=False))
-
-        print("\n=== BACKTEST (ENSEMBLE) ===")
-        bt = improved_backtest_per_ticker(
-            prob_test_ens,
-            fwd_test,
-            dates_test,
-            secids_test,
-            threshold=best_thr,
-            fee=float(CFG["FEE"]),
-        )
-        print(bt.to_string(index=False))
+    # NOTE: We intentionally do NOT do "pick best seed" model selection here.
 
 
 if __name__ == "__main__":

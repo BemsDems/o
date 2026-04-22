@@ -197,13 +197,16 @@ def run_once_panel(
     )
 
     hist_info = history_summary(history)
-    test_metrics = compact_prob_metrics(y_test, prob_test_cal)
-    test_metrics["pr_auc"] = (
-        float(average_precision_score(y_test, prob_test_cal)) if len(np.unique(y_test)) > 1 else float("nan")
+
+    test_metrics_raw = compact_prob_metrics(y_test, prob_test_raw)
+    test_metrics_raw["pr_auc"] = (
+        float(average_precision_score(y_test, prob_test_raw)) if len(np.unique(y_test)) > 1 else float("nan")
     )
-    test_metrics["pr_auc_lift"] = (
-        float(test_metrics["pr_auc"] - test_metrics["pos_rate"]) if np.isfinite(test_metrics["pr_auc"]) else float("nan")
+    test_metrics_raw["pr_auc_lift"] = (
+        float(test_metrics_raw["pr_auc"] - test_metrics_raw["pos_rate"]) if np.isfinite(test_metrics_raw["pr_auc"]) else float("nan")
     )
+
+    test_metrics_cal = compact_prob_metrics(y_test, prob_test_cal)
 
     dec_test = make_decile_table(y_test, prob_test_raw, future_ret=fret_test, n_bins=10)
     dec_spread = float(dec_test.iloc[-1]["buy_rate"] - dec_test.iloc[0]["buy_rate"]) if len(dec_test) >= 2 else float("nan")
@@ -250,15 +253,22 @@ def run_once_panel(
         f"best_val_loss={hist_info['best_val_loss']:.4f}"
     )
     print(
-        f"TEST | roc_auc={test_metrics['roc_auc']:.4f} "
-        f"pr_auc={test_metrics['pr_auc']:.4f} "
-        f"pr_lift={test_metrics['pr_auc_lift']:+.4f} | "
-        f"logloss_gain={test_metrics['logloss_gain_vs_baseline']:+.4f} | "
-        f"ece10={test_metrics['ece10']:.4f} | "
-        f"prob_mean={test_metrics['prob_mean']:.4f}±{test_metrics['prob_std']:.4f} | "
+        f"TEST RAW | roc_auc={test_metrics_raw['roc_auc']:.4f} "
+        f"pr_auc={test_metrics_raw['pr_auc']:.4f} "
+        f"pr_lift={test_metrics_raw['pr_auc_lift']:+.4f} | "
+        f"prob_mean={test_metrics_raw['prob_mean']:.4f}±{test_metrics_raw['prob_std']:.4f}"
+    )
+    print(
+        f"TEST CAL | logloss={test_metrics_cal['logloss']:.4f} "
+        f"(gain_vs_base={test_metrics_cal['logloss_gain_vs_baseline']:+.4f}) | "
+        f"ece10={test_metrics_cal['ece10']:.4f} | "
+        f"brier={test_metrics_cal['brier']:.4f} | "
         f"prob_psi(train→test)={p_psi:.3f}"
     )
-    print(f"inverted_signal={test_metrics['roc_auc_inv'] > test_metrics['roc_auc']} (roc_auc(1-p)={test_metrics['roc_auc_inv']:.4f})")
+    print(
+        f"inverted_signal_raw={test_metrics_raw['roc_auc_inv'] > test_metrics_raw['roc_auc']} "
+        f"(roc_auc_raw(1-p)={test_metrics_raw['roc_auc_inv']:.4f})"
+    )
     print(f"decile_spread(buy_rate top-bottom)={dec_spread:+.4f}")
     print("deciles (TEST):")
     print(dec_test.to_string(index=False))
@@ -287,17 +297,22 @@ def run_once_panel(
         dec_test.to_csv(seed_dir / "decile_test.csv", index=False)
         bt_pnl_tbl.to_csv(seed_dir / "backtest_by_ticker.csv", index=False)
 
-        pd.DataFrame(
+    pd.DataFrame(
             [
                 {
                     "seed": int(run_seed),
                     "best_epoch": int(hist_info["best_epoch"]) if pd.notna(hist_info["best_epoch"]) else np.nan,
                     "thr_f1": float(thr_f1),
                     "thr_pnl": float(thr_pnl),
-                    "roc_auc": float(test_metrics["roc_auc"]),
-                    "pr_auc": float(test_metrics["pr_auc"]),
-                    "logloss_gain_vs_baseline": float(test_metrics["logloss_gain_vs_baseline"]),
-                    "prob_psi": float(p_psi),
+
+                    "roc_auc_raw": float(test_metrics_raw["roc_auc"]),
+                    "pr_auc_raw": float(test_metrics_raw["pr_auc"]),
+
+                    "logloss_gain_vs_baseline_cal": float(test_metrics_cal["logloss_gain_vs_baseline"]),
+                    "ece10_cal": float(test_metrics_cal["ece10"]),
+                    "brier_cal": float(test_metrics_cal["brier"]),
+                    "prob_psi_cal": float(p_psi),
+
                     "alpha_thr_pnl": float(alpha_thr_pnl),
                     "n_trades_thr_pnl": int(n_trades_thr_pnl),
                 }
@@ -306,10 +321,15 @@ def run_once_panel(
 
     return {
         "seed": int(run_seed),
-        "roc_auc": float(test_metrics["roc_auc"]),
-        "pr_auc": float(test_metrics["pr_auc"]),
-        "logloss_gain_vs_baseline": float(test_metrics["logloss_gain_vs_baseline"]),
+
+        "roc_auc": float(test_metrics_raw["roc_auc"]),
+        "pr_auc": float(test_metrics_raw["pr_auc"]),
+
+        "logloss_gain_vs_baseline": float(test_metrics_cal["logloss_gain_vs_baseline"]),
+        "ece10": float(test_metrics_cal["ece10"]),
+        "brier": float(test_metrics_cal["brier"]),
         "prob_psi": float(p_psi),
+
         "alpha_thr_pnl": float(alpha_thr_pnl),
         "n_trades_thr_pnl": int(n_trades_thr_pnl),
         "best_epoch": int(hist_info["best_epoch"]) if np.isfinite(hist_info["best_epoch"]) else -1,

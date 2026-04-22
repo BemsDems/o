@@ -118,6 +118,8 @@ if __name__ == "__main__":
                     "roc_auc",
                     "pr_auc",
                     "logloss_gain_vs_baseline",
+                    "ece10",
+                    "brier",
                     "prob_psi",
                     "alpha_thr_pnl",
                     "n_trades_thr_pnl",

@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from sklearn.preprocessing import RobustScaler
-from sklearn.utils.class_weight import compute_class_weight
 
 from project.config import CFG, seed_everything
 from project.data_loader import MultiDataset, build_multi_ticker_dataset
@@ -67,11 +66,6 @@ def main() -> None:
     print(f"Train: [{X_train.min():.2f}, {X_train.max():.2f}], NaN={np.isnan(X_train).any()}")
     print(f"y_train distribution: {np.bincount(y_train.astype(int))}")
 
-    # Class weights
-    w = compute_class_weight("balanced", classes=np.array([0, 1]), y=y_train)
-    cw = {0: float(w[0]), 1: float(w[1])}
-    print(f"Class weights: {cw}")
-
     base_seed = int(CFG.get("SEED", 42))
     n_runs = int(CFG.get("N_RUNS", 1))
 
@@ -108,8 +102,8 @@ def main() -> None:
             validation_data=(X_val, y_val),
             epochs=int(CFG["EPOCHS"]),
             batch_size=int(CFG["BATCH_SIZE"]),
-            shuffle=False,
-            class_weight=cw,
+            shuffle=True,
+            class_weight=None,
             callbacks=cb,
             verbose=2,
         )

@@ -62,6 +62,52 @@ def non_overlap_pnl_panel(
     return float(np.mean(trades)), int(len(trades))
 
 
+def non_overlap_pnl_panel_by_ticker(
+    pred: np.ndarray,
+    future_ret: np.ndarray,
+    dates: np.ndarray,
+    tickers: np.ndarray,
+    horizon: int,
+    fee: float,
+) -> pd.DataFrame:
+    """Per-ticker non-overlap trade table.
+
+    Returns a DataFrame with columns: ticker, n_trades, avg_trade_ret.
+    """
+    tmp = pd.DataFrame(
+        {
+            "pred": pred.astype(int),
+            "future_ret": future_ret.astype(float),
+            "date": pd.to_datetime(dates),
+            "ticker": tickers.astype(str),
+        }
+    ).sort_values(["ticker", "date"]).reset_index(drop=True)
+
+    rows = []
+    for ticker, g in tmp.groupby("ticker", sort=False):
+        p = g["pred"].values
+        fr = g["future_ret"].values
+
+        trades = []
+        i = 0
+        while i < len(g):
+            if p[i] == 1:
+                trades.append(float(fr[i] - fee))
+                i += horizon
+            else:
+                i += 1
+
+        rows.append(
+            {
+                "ticker": str(ticker),
+                "n_trades": int(len(trades)),
+                "avg_trade_ret": float(np.mean(trades)) if trades else 0.0,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
 def panel_backtest_by_ticker(
     prob: np.ndarray,
     dates_signal: np.ndarray,

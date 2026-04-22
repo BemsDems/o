@@ -64,7 +64,9 @@ CFG: Dict[str, Any] = {
 BASE_FEATURES = [
     "ret_1", "ret_2", "ret_5", "ret_10", "ret_20", "log_ret",
     "dist_sma20", "dist_sma50", "trend_up_200", "rsi_14",
-    "vol_rel", "bb_width", "bb_pos", "vol_ratio_5_20", "vol_spike",
+    "vol_rel", "atr_rel", "bb_width", "bb_pos",
+    "vol_ratio_5_20", "vol_spike",
+    "usd_ret_1", "usd_ret_5",
     "imoex_ret_1", "imoex_ret_5", "imoex_ret_20",
     "stock_vs_imoex_5",
     "key_rate_chg", "rate_rising",

@@ -14,7 +14,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from src.evaluation.backtest import non_overlap_pnl, non_overlap_pnl_panel
+from src.evaluation.backtest import non_overlap_pnl, non_overlap_pnl_panel, non_overlap_pnl_panel_by_ticker
 
 
 def ece_score(y_true: np.ndarray, prob: np.ndarray, n_bins: int = 10) -> float:
@@ -189,7 +189,7 @@ def pick_threshold_on_val_panel(
         bal = balanced_accuracy_score(y_true_val, pred)
         mcc = matthews_corrcoef(y_true_val, pred) if len(np.unique(pred)) > 1 else 0.0
 
-        avg_pnl, n_tr = non_overlap_pnl_panel(
+        pnl_tbl = non_overlap_pnl_panel_by_ticker(
             pred,
             future_ret_val,
             dates_val,
@@ -198,10 +198,22 @@ def pick_threshold_on_val_panel(
             fee,
         )
 
-        MIN_TRADES = 15
+        avg_pnl = float(pnl_tbl["avg_trade_ret"].mean()) if not pnl_tbl.empty else -1e9
+        n_tr = int(pnl_tbl["n_trades"].sum()) if not pnl_tbl.empty else 0
+
+        MIN_TRADES = 20
+        MIN_TRADES_PER_TICKER = 3
         MIN_BUY_RATE = 0.05
         MAX_BUY_RATE = 0.35
-        feasible = (n_tr >= MIN_TRADES) and (MIN_BUY_RATE <= pred.mean() <= MAX_BUY_RATE)
+
+        feasible_tickers = int((pnl_tbl["n_trades"] >= MIN_TRADES_PER_TICKER).sum()) if not pnl_tbl.empty else 0
+        n_unique_tickers = int(len(np.unique(np.asarray(tickers_val).astype(str))))
+
+        feasible = (
+            (n_tr >= MIN_TRADES)
+            and (MIN_BUY_RATE <= pred.mean() <= MAX_BUY_RATE)
+            and (feasible_tickers >= max(2, n_unique_tickers - 1))
+        )
         if not feasible:
             avg_pnl = -1e9
 

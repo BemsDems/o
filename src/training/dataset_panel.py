@@ -74,7 +74,21 @@ def prepare_dataset_once_panel() -> Dict[str, Any]:
     print(feat["ticker"].value_counts().sort_index().to_string())
     print("Class share (BUY=1):", float(feat["Target"].mean().round(3)))
 
-    FEATURES = [c for c in BASE_FEATURES if c in feat.columns]
+    print("\nTarget share by ticker:")
+    print(
+        feat.groupby("ticker")["Target"]
+        .mean()
+        .sort_index()
+        .to_string()
+    )
+
+    # Ticker identity features (one-hot). This is critical for a multi-ticker
+    # classifier so the model can learn per-ticker baselines/regimes.
+    ticker_dummies = pd.get_dummies(feat["ticker"], prefix="ticker", dtype=float)
+    feat = pd.concat([feat, ticker_dummies], axis=1)
+
+    ticker_features = sorted(ticker_dummies.columns.tolist())
+    FEATURES = [c for c in BASE_FEATURES if c in feat.columns] + ticker_features
     print("\nSELECTED FEATURES:")
     print(FEATURES)
     print(f"Признаков используется: {len(FEATURES)}")

@@ -172,7 +172,12 @@ def main() -> None:
         best_thr, best_f1 = 0.5, 0.0
         from sklearn.metrics import f1_score
 
-        for thr in np.arange(0.30, 0.85, 0.01):
+        p_min, p_max = float(y_prob_val.min()), float(y_prob_val.max())
+        thr_range = np.arange(max(0.05, p_min), min(0.95, p_max), 0.01)
+        if len(thr_range) == 0:
+            thr_range = np.arange(0.05, 0.96, 0.01)
+
+        for thr in thr_range:
             pred = (y_prob_val >= thr).astype(int)
             if pred.sum() == 0:
                 continue

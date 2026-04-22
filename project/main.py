@@ -66,12 +66,22 @@ def main() -> None:
     print(f"Train: [{X_train.min():.2f}, {X_train.max():.2f}], NaN={np.isnan(X_train).any()}")
     print(f"y_train distribution: {np.bincount(y_train.astype(int))}")
 
-    base_seed = int(CFG.get("SEED", 42))
-    n_runs = int(CFG.get("N_RUNS", 1))
+    use_ensemble = bool(CFG.get("USE_ENSEMBLE", False))
+    if use_ensemble:
+        seeds = [int(s) for s in (CFG.get("ENSEMBLE_SEEDS") or [])]
+        if not seeds:
+            seeds = [42, 43, 44, 45, 46]
+        print(f"\nUsing ensemble seeds: {seeds}")
+    else:
+        base_seed = int(CFG.get("SEED", 42))
+        n_runs = int(CFG.get("N_RUNS", 1))
+        seeds = [base_seed + i for i in range(n_runs)]
 
-    for run_idx in range(n_runs):
-        run_seed = base_seed + run_idx
-        print(f"\n\n================ RUN {run_idx + 1}/{n_runs} | SEED={run_seed} ================")
+    prob_val_list = []
+    prob_test_list = []
+
+    for run_idx, run_seed in enumerate(seeds):
+        print(f"\n\n================ RUN {run_idx + 1}/{len(seeds)} | SEED={run_seed} ================")
 
         _set_seed(run_seed)
         tf.keras.backend.clear_session()
@@ -82,15 +92,15 @@ def main() -> None:
         cb = [
             tf.keras.callbacks.EarlyStopping(
                 monitor="val_auc",
-                patience=20,
+                patience=int(CFG.get("ES_PATIENCE", 20)),
                 mode="max",
                 restore_best_weights=True,
-                min_delta=0.001,
+                min_delta=float(CFG.get("ES_MIN_DELTA", 0.001)),
             ),
             tf.keras.callbacks.ReduceLROnPlateau(
                 monitor="val_auc",
                 factor=0.5,
-                patience=15,
+                patience=max(2, int(CFG.get("ES_PATIENCE", 20)) // 2),
                 mode="max",
                 min_lr=1e-6,
             ),
@@ -111,6 +121,9 @@ def main() -> None:
         y_prob_val = model.predict(X_val, verbose=0).ravel()
         y_prob = model.predict(X_test, verbose=0).ravel()
 
+        prob_val_list.append(y_prob_val)
+        prob_test_list.append(y_prob)
+
         print(
             f"\nVal prob: mean={y_prob_val.mean():.4f}, std={y_prob_val.std():.4f}, "
             f"range=[{y_prob_val.min():.4f}, {y_prob_val.max():.4f}]"
@@ -124,7 +137,7 @@ def main() -> None:
             print("FATAL: NaN in predictions")
             continue
 
-        # Threshold search
+        # Threshold search (per-run)
         print("\n=== THRESHOLD OPTIMIZATION (VAL) ===")
         best_thr, best_f1 = 0.5, 0.0
         from sklearn.metrics import f1_score
@@ -172,6 +185,55 @@ def main() -> None:
         print("\n=== BACKTEST ===")
         bt = improved_backtest_per_ticker(
             y_prob,
+            fwd_test,
+            dates_test,
+            secids_test,
+            threshold=best_thr,
+            fee=float(CFG["FEE"]),
+        )
+        print(bt.to_string(index=False))
+
+    # Ensemble summary (average probabilities)
+    if use_ensemble and prob_test_list:
+        prob_val_ens = np.mean(np.vstack(prob_val_list), axis=0)
+        prob_test_ens = np.mean(np.vstack(prob_test_list), axis=0)
+
+        print("\n\n================ ENSEMBLE (mean probs) ================")
+        print(
+            f"Val prob: mean={prob_val_ens.mean():.4f}, std={prob_val_ens.std():.4f}, "
+            f"range=[{prob_val_ens.min():.4f}, {prob_val_ens.max():.4f}]"
+        )
+        print(
+            f"Test prob: mean={prob_test_ens.mean():.4f}, std={prob_test_ens.std():.4f}, "
+            f"range=[{prob_test_ens.min():.4f}, {prob_test_ens.max():.4f}]"
+        )
+
+        # Threshold search on ensemble VAL
+        print("\n=== THRESHOLD OPTIMIZATION (VAL, ENSEMBLE) ===")
+        best_thr, best_f1 = 0.5, 0.0
+        from sklearn.metrics import f1_score
+
+        for thr in np.arange(0.30, 0.85, 0.01):
+            pred = (prob_val_ens >= thr).astype(int)
+            if pred.sum() == 0:
+                continue
+            f1v = f1_score(y_val, pred, zero_division=0)
+            if f1v > best_f1:
+                best_f1, best_thr = float(f1v), float(thr)
+
+        print(f"Best threshold (ensemble): {best_thr:.2f} (F1={best_f1:.3f})")
+
+        print("\n=== FINAL RESULTS (ENSEMBLE) ===")
+        g = evaluate_global(y_test, prob_test_ens, thr=best_thr)
+        for k, v in g.items():
+            print(f" {k}: {v:.4f}")
+
+        print("\n=== PER-TICKER AUC (ENSEMBLE) ===")
+        print(per_ticker_metrics(y_test, prob_test_ens, secids_test).to_string(index=False))
+
+        print("\n=== BACKTEST (ENSEMBLE) ===")
+        bt = improved_backtest_per_ticker(
+            prob_test_ens,
             fwd_test,
             dates_test,
             secids_test,

@@ -23,6 +23,16 @@ CFG: Dict[str, Any] = {
     "LR": 3e-4,
     "SEED": 42,
     "N_RUNS": 3,
+
+    # If enabled, train multiple models with different seeds and average
+    # predicted probabilities (defensible improvement vs picking a "lucky" seed).
+    "USE_ENSEMBLE": True,
+    "ENSEMBLE_SEEDS": [42, 43, 44, 45, 46],
+
+    # Regularization / early stop (reduce overfitting)
+    "DROPOUT": 0.5,
+    "ES_PATIENCE": 5,
+    "ES_MIN_DELTA": 0.005,
     "FEE": 0.001,
     "EXTENDED_DIAGNOSTICS": True,
 }

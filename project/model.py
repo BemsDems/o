@@ -11,7 +11,10 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
     x_in = tf.keras.Input(shape=input_shape)
     x = tf.keras.layers.LayerNormalization()(x_in)
 
-    for filters, dilation in [(64, 1), (64, 2), (64, 4), (32, 8)]:
+    # Smaller, more regularized TCN to reduce overfitting on limited samples.
+    dropout = float(CFG.get("DROPOUT", 0.3))
+
+    for filters, dilation in [(32, 1), (32, 2), (16, 4)]:
         x = tf.keras.layers.Conv1D(
             filters,
             kernel_size=3,
@@ -21,13 +24,13 @@ def build_tcn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
             kernel_initializer="he_normal",
         )(x)
         x = tf.keras.layers.BatchNormalization()(x)
-        x = tf.keras.layers.Dropout(0.3)(x)
+        x = tf.keras.layers.Dropout(dropout)(x)
 
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
     x = tf.keras.layers.Dense(64, activation="relu")(x)
-    x = tf.keras.layers.Dropout(0.4)(x)
+    x = tf.keras.layers.Dropout(dropout)(x)
     x = tf.keras.layers.Dense(32, activation="relu")(x)
-    x = tf.keras.layers.Dropout(0.3)(x)
+    x = tf.keras.layers.Dropout(dropout)(x)
     out = tf.keras.layers.Dense(1, activation="sigmoid")(x)
 
     model = tf.keras.Model(x_in, out)

@@ -38,7 +38,8 @@ CFG: Dict[str, Any] = {
     "NON_OVERLAP": True, # skip next HORIZON days after entry
 
     # Multi-seed evaluation
-    "RUN_SEEDS": [11, 21, 31, 41, 51],
+    # NOTE: temporary single-seed sanity run (see moex_tcn_chatgpt_panel guidance).
+    "RUN_SEEDS": [41],
 
     # Probability calibration (post-processing)
     "USE_PLATT_CALIBRATION": True,

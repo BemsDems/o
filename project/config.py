@@ -34,7 +34,7 @@ CFG: Dict[str, Any] = {
     "CACHE_DIR": "/content/cache",
     "CACHE_ENABLED": True,
     # Multi-horizon training: each horizon becomes a separate "panel" via horizon_norm feature.
-    "HORIZONS": [5, 10, 30, 60, 120, 240, 360],
+    "HORIZONS": [5, 10, 30, 60, 120, 240, 360, 365],
     "THR_MAP": {
         5: 0.03,
         10: 0.04,
@@ -43,6 +43,7 @@ CFG: Dict[str, Any] = {
         120: 0.12,
         240: 0.18,
         360: 0.25,
+        365: 0.25,
     },
 
     # Backward compatibility (single-horizon consumers may still use these keys).

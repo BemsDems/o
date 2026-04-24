@@ -531,7 +531,8 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
             tmp["date"] = tmp.index
 
             # Horizon as a feature (normalized to [0,1]).
-            tmp["horizon_norm"] = h / 360.0
+            # Keep consistent with the maximum horizon in config (365 days).
+            tmp["horizon_norm"] = h / 365.0
             tmp["horizon_days"] = h
             rows.append(tmp.reset_index(drop=True))
 

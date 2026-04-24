@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, date
 import os
 import pickle
 from pathlib import Path
@@ -26,11 +26,21 @@ def _cache_path(name: str) -> Path:
 
 
 def _load_cache(name: str):
-    """Load from cache if exists, else return None."""
+    """Load from cache if exists and is fresh.
+
+    Freshness rule: if the cache file mtime is older than today, treat it as stale.
+    """
     if not CFG.get("CACHE_ENABLED", True):
         return None
     p = _cache_path(name)
     if p.exists():
+        try:
+            mtime = datetime.fromtimestamp(p.stat().st_mtime).date()
+            if mtime < date.today():
+                print(f"  [cache] {name} stale ({mtime}), re-fetch")
+                return None
+        except Exception:
+            return None
         with open(p, "rb") as f:
             return pickle.load(f)
     return None
@@ -46,7 +56,7 @@ def _save_cache(name: str, obj) -> None:
 
 def _resolve_end_date(end: str | None) -> str:
     if end is None:
-        return datetime.now().strftime("%Y-%m-%d")
+        return date.today().strftime("%Y-%m-%d")
     return str(end)
 
 

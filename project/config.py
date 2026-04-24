@@ -20,7 +20,8 @@ CFG: Dict[str, Any] = {
         "BSPB", "AQUA", "RNFT", "MSNG", "LSRG", "RENI",
     ],
     "START": "2015-01-01",
-    "END": datetime.now().strftime("%Y-%m-%d"),
+    # None = up to today (inclusive). Data loader resolves it to date.today().
+    "END": None,
 
     # Cache (Colab-friendly)
     # NOTE: In Colab, /content is the default working dir.

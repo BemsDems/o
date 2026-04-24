@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import os
+import pickle
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -12,6 +15,35 @@ from moexalgo import Ticker
 from project.config import CFG
 
 
+def _cache_dir() -> Path:
+    d = Path(CFG.get("CACHE_DIR", "cache"))
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _cache_path(name: str) -> Path:
+    return _cache_dir() / name
+
+
+def _load_cache(name: str):
+    """Load from cache if exists, else return None."""
+    if not CFG.get("CACHE_ENABLED", True):
+        return None
+    p = _cache_path(name)
+    if p.exists():
+        with open(p, "rb") as f:
+            return pickle.load(f)
+    return None
+
+
+def _save_cache(name: str, obj) -> None:
+    if not CFG.get("CACHE_ENABLED", True):
+        return
+    p = _cache_path(name)
+    with open(p, "wb") as f:
+        pickle.dump(obj, f)
+
+
 def _resolve_end_date(end: str | None) -> str:
     if end is None:
         return datetime.now().strftime("%Y-%m-%d")
@@ -19,6 +51,12 @@ def _resolve_end_date(end: str | None) -> str:
 
 
 def fetch_moex_candles(secid: str, start: str, end: str | None) -> pd.DataFrame:
+    cache_name = f"candles_{secid}_{start}_{end or 'today'}.pkl"
+    cached = _load_cache(cache_name)
+    if cached is not None:
+        print(f"  [cache] {secid} candles loaded from cache ({len(cached)} rows)")
+        return cached
+
     end_resolved = _resolve_end_date(end)
     raw = Ticker(secid).candles(start=str(start), end=str(end_resolved), period="1D")
     df = pd.DataFrame(raw)
@@ -32,6 +70,8 @@ def fetch_moex_candles(secid: str, start: str, end: str | None) -> pd.DataFrame:
     df = df[keep].sort_index()
     df = df.rename(columns={"close": "CLOSE", "high": "HIGH", "low": "LOW", "volume": "VOLUME"})
     df["secid"] = str(secid)
+
+    _save_cache(cache_name, df)
     return df
 
 
@@ -39,6 +79,12 @@ def fetch_moex_candles(secid: str, start: str, end: str | None) -> pd.DataFrame:
 
 
 def fetch_dividends_moex(secid: str, timeout: int = 15) -> pd.DataFrame:
+    cache_name = f"divs_{secid}.pkl"
+    cached = _load_cache(cache_name)
+    if cached is not None:
+        print(f"  [cache] {secid} dividends loaded from cache ({len(cached)} rows)")
+        return cached
+
     """Fetch full dividend history from MOEX ISS.
 
     Returns DataFrame with columns:
@@ -74,7 +120,9 @@ def fetch_dividends_moex(secid: str, timeout: int = 15) -> pd.DataFrame:
             df = df[df["currencyid"].str.upper() == "RUB"].copy()
 
         df = df.sort_values("registryclosedate").reset_index(drop=True)
-        return df[["registryclosedate", "value"]]
+        df = df[["registryclosedate", "value"]]
+        _save_cache(cache_name, df)
+        return df
     except Exception as e:
         print(f"  [div] {secid}: fetch failed ({type(e).__name__}: {e})")
         return pd.DataFrame()
@@ -186,6 +234,12 @@ def _fetch_macro_close(secid: str, start: str, end: str) -> pd.Series:
 
 
 def fetch_macro_data(start: str, end: str) -> pd.DataFrame:
+    cache_name = f"macro_{start}_{end or 'today'}.pkl"
+    cached = _load_cache(cache_name)
+    if cached is not None:
+        print(f"  [cache] macro data loaded from cache ({len(cached)} rows)")
+        return cached
+
     """Fetch macro instruments (USD/RUB, Brent proxy, IMOEX) and compute features.
 
     Designed to be called once, then joined to each stock's feature frame by date.
@@ -265,6 +319,8 @@ def fetch_macro_data(start: str, end: str) -> pd.DataFrame:
 
     print(f"  [macro] features: {list(out.columns)}")
     print(f"  [macro] date range: {out.index.min()} — {out.index.max()}")
+
+    _save_cache(cache_name, out)
     return out
 
 

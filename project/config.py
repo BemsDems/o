@@ -21,6 +21,12 @@ CFG: Dict[str, Any] = {
     ],
     "START": "2015-01-01",
     "END": datetime.now().strftime("%Y-%m-%d"),
+
+    # Cache (Colab-friendly)
+    # NOTE: In Colab, /content is the default working dir.
+    # We keep cache under /content/o/cache to avoid re-downloading market data.
+    "CACHE_DIR": "/content/o/cache",
+    "CACHE_ENABLED": True,
     # Multi-horizon training: each horizon becomes a separate "panel" via horizon_norm feature.
     "HORIZONS": [5, 10, 30, 60, 120, 240, 360],
     "THR_MAP": {

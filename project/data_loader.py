@@ -55,7 +55,8 @@ def _save_cache(name: str, obj) -> None:
 
 
 def _resolve_end_date(end: str | None) -> str:
-    if end is None:
+    # Colab users may pass END=None in CFG; sometimes it can arrive as string "None".
+    if end is None or str(end).strip().lower() == "none":
         return date.today().strftime("%Y-%m-%d")
     return str(end)
 
@@ -244,6 +245,8 @@ def _fetch_macro_close(secid: str, start: str, end: str) -> pd.Series:
 
 
 def fetch_macro_data(start: str, end: str) -> pd.DataFrame:
+    end = _resolve_end_date(end)
+
     cache_name = f"macro_{start}_{end or 'today'}.pkl"
     cached = _load_cache(cache_name)
     if cached is not None:

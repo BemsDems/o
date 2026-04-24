@@ -46,15 +46,17 @@ CFG: Dict[str, Any] = {
     "SEQ_LEN": 30,
     "TRAIN_SPLIT": 0.70,
     "VAL_SPLIT": 0.15,
-    "BATCH_SIZE": 64,
-    "EPOCHS": 100,
+    # Training speed defaults (CPU-friendly). On Colab GPU you can lower batch and/or increase seeds.
+    "BATCH_SIZE": 256,
+    "EPOCHS": 50,
     "LR": 3e-4,
     "SEED": 42,
     "N_RUNS": 3,
 
     # Ensemble is a defensible way to improve stability without "picking the best seed".
     "USE_ENSEMBLE": True,
-    "ENSEMBLE_SEEDS": [42, 43, 44, 45, 46],
+    # Start with 1 seed to verify training end-to-end; scale up later.
+    "ENSEMBLE_SEEDS": [42],
 
     # Early stopping tuned for fast overfitting regimes.
     "ES_PATIENCE": 5,

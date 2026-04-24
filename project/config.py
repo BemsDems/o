@@ -24,8 +24,8 @@ CFG: Dict[str, Any] = {
 
     # Cache (Colab-friendly)
     # NOTE: In Colab, /content is the default working dir.
-    # We keep cache under /content/o/cache to avoid re-downloading market data.
-    "CACHE_DIR": "/content/o/cache",
+    # We keep cache under /content/cache to avoid re-downloading market data.
+    "CACHE_DIR": "/content/cache",
     "CACHE_ENABLED": True,
     # Multi-horizon training: each horizon becomes a separate "panel" via horizon_norm feature.
     "HORIZONS": [5, 10, 30, 60, 120, 240, 360],

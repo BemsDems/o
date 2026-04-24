@@ -443,27 +443,41 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
             print(f"  -> too few rows after features ({len(df_feat)} < {min_rows}), skip")
             continue
 
-        y, fwd_ret = make_target(
-            df_feat["CLOSE"], int(CFG["HORIZON"]), float(CFG["THR_MOVE"])
-        )
+        horizons = CFG.get("HORIZONS", [int(CFG["HORIZON"])])
+        thr_map = CFG.get("THR_MAP", {int(CFG["HORIZON"]): float(CFG["THR_MOVE"])})
 
-        h = int(CFG["HORIZON"])
-        df_feat = df_feat.iloc[:-h]
-        y = y.iloc[:-h]
-        fwd_ret = fwd_ret.iloc[:-h]
+        for h in horizons:
+            h = int(h)
+            thr = float(thr_map.get(h, float(CFG.get("THR_MOVE", 0.03))))
 
-        print(f"  final rows (after horizon trim): {len(df_feat)}")
+            y_h, fwd_ret_h = make_target(df_feat["CLOSE"], h, thr)
 
-        tmp = df_feat.copy()
-        tmp["target"] = y.values
-        tmp["fwd_ret"] = fwd_ret.values
-        tmp["date"] = tmp.index
-        rows.append(tmp.reset_index(drop=True))
+            df_h = df_feat.iloc[:-h].copy()
+            y_h = y_h.iloc[:-h]
+            fwd_ret_h = fwd_ret_h.iloc[:-h]
+
+            tmp = df_h.copy()
+            tmp["target"] = y_h.values
+            tmp["fwd_ret"] = fwd_ret_h.values
+            tmp["date"] = tmp.index
+
+            # Horizon as a feature (normalized to [0,1]).
+            tmp["horizon_norm"] = h / 360.0
+            tmp["horizon_days"] = h
+            rows.append(tmp.reset_index(drop=True))
+
+            print(
+                f"  {secid} h={h}d thr={thr}: {len(df_h)} rows, pos_rate={float(y_h.mean()):.3%}"
+            )
 
     if not rows:
         raise RuntimeError("No tickers loaded. Check MOEX availability / tickers list.")
 
     full = pd.concat(rows, axis=0).sort_values(["secid", "date"]).reset_index(drop=True)
+
+    # Ensure sequences/splits don't mix different horizons for the same ticker.
+    if "horizon_days" in full.columns:
+        full["secid"] = full["secid"].astype(str) + "_h" + full["horizon_days"].astype(str)
 
     technical_cols = [
         "logret_1",
@@ -483,7 +497,7 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
         "volatility_20",
     ]
     fundamental_cols = ["div_yield_ttm", "days_since_last_div", "div_yield_is_missing"] if use_div_fund else []
-    feature_cols = technical_cols + fundamental_cols + macro_cols
+    feature_cols = technical_cols + fundamental_cols + macro_cols + ["horizon_norm"]
 
     # NOTE: technical features must exist; macro features are optional (filled with zeros
     # if the macro series failed to load).

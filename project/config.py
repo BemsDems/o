@@ -10,9 +10,30 @@ import tensorflow as tf
 
 
 CFG: Dict[str, Any] = {
-    "TICKERS": ["SBER", "GAZP", "LKOH", "YNDX"],
+    "TICKERS": [
+        "SBER", "GAZP", "LKOH", "ROSN", "GMKN", "NVTK", "YNDX", "MTSS",
+        "MGNT", "FIVE", "PLZL", "POLY", "ALRS", "CHMF", "NLMK", "MAGN",
+        "VTBR", "MOEX", "PHOR", "RUAL", "OZON", "VKCO", "IRAO", "FEES",
+        "HYDR", "RTKM", "AFLT", "PIKK", "SMLT", "SGZH", "MTLR", "AFKS",
+        "CBOM", "TATN", "SNGS", "BANEP", "TRNFP", "NMTP", "FLOT",
+        "TCSG", "FIXP", "ENPG", "LENT", "RASP", "SELG",
+        "BSPB", "AQUA", "RNFT", "MSNG", "LSRG", "RENI",
+    ],
     "START": "2015-01-01",
     "END": datetime.now().strftime("%Y-%m-%d"),
+    # Multi-horizon training: each horizon becomes a separate "panel" via horizon_norm feature.
+    "HORIZONS": [5, 10, 30, 60, 120, 240, 360],
+    "THR_MAP": {
+        5: 0.03,
+        10: 0.04,
+        30: 0.05,
+        60: 0.08,
+        120: 0.12,
+        240: 0.18,
+        360: 0.25,
+    },
+
+    # Backward compatibility (single-horizon consumers may still use these keys).
     "HORIZON": 5,
     "THR_MOVE": 0.03,
     "SEQ_LEN": 30,

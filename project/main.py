@@ -5,6 +5,8 @@ import pandas as pd
 import tensorflow as tf
 from sklearn.preprocessing import RobustScaler
 
+import json
+import pickle
 import subprocess
 from pathlib import Path
 
@@ -43,6 +45,12 @@ def main() -> None:
         f"ES_PATIENCE={CFG.get('ES_PATIENCE')} ES_MIN_DELTA={CFG.get('ES_MIN_DELTA')}"
     )
     print("=" * 72 + "\n")
+
+    # --- Saving (best model across seeds) ---
+    save_best = bool(CFG.get("SAVE_BEST_MODEL", True))
+    save_dir = Path(CFG.get("SAVE_DIR", "artifacts"))
+    if save_best:
+        save_dir.mkdir(parents=True, exist_ok=True)
 
     # Build dataset ONCE (deterministic), then run multiple training seeds.
     ds, feature_cols = build_multi_ticker_dataset()
@@ -110,6 +118,9 @@ def main() -> None:
     prob_val_list = []
     prob_test_list = []
 
+    # Track best run by validation ROC-AUC (single best model).
+    best_run: dict | None = None  # {seed, val_auc, ckpt_path}
+
     for run_idx, run_seed in enumerate(seeds):
         print(f"\n\n================ RUN {run_idx + 1}/{len(seeds)} | SEED={run_seed} ================")
 
@@ -119,7 +130,23 @@ def main() -> None:
         model = build_tcn_model((n_steps, n_feat))
         model.summary()
 
+        # Always checkpoint the best weights within this run.
+        ckpt_path = (save_dir / f"best_model_seed_{run_seed}.keras") if save_best else None
+
         cb = [
+            *(
+                [
+                    tf.keras.callbacks.ModelCheckpoint(
+                        filepath=str(ckpt_path),
+                        monitor="val_auc",
+                        mode="max",
+                        save_best_only=True,
+                        verbose=0,
+                    )
+                ]
+                if ckpt_path is not None
+                else []
+            ),
             tf.keras.callbacks.EarlyStopping(
                 monitor="val_auc",
                 patience=int(CFG.get("ES_PATIENCE", 20)),
@@ -148,8 +175,24 @@ def main() -> None:
             verbose=2,
         )
 
+        # Reload best checkpoint for this seed (by val_auc) so that selection is consistent.
+        if ckpt_path is not None and ckpt_path.exists():
+            model = tf.keras.models.load_model(str(ckpt_path))
+
         y_prob_val = model.predict(X_val, verbose=0).ravel()
         y_prob = model.predict(X_test, verbose=0).ravel()
+
+        # Compute val AUC for cross-seed best-model selection.
+        try:
+            from sklearn.metrics import roc_auc_score
+
+            val_auc_run = float(roc_auc_score(y_val, y_prob_val)) if len(np.unique(y_val)) > 1 else float("nan")
+        except Exception:
+            val_auc_run = float("nan")
+
+        if save_best and ckpt_path is not None and np.isfinite(val_auc_run):
+            if best_run is None or val_auc_run > float(best_run["val_auc"]):
+                best_run = {"seed": int(run_seed), "val_auc": float(val_auc_run), "ckpt_path": str(ckpt_path)}
 
         prob_val_list.append(y_prob_val)
         prob_test_list.append(y_prob)
@@ -275,6 +318,37 @@ def main() -> None:
             fee=float(CFG["FEE"]),
         )
         print(bt.to_string(index=False))
+
+    # --- Save best single model across seeds (by VAL ROC-AUC) ---
+    if save_best and best_run is not None:
+        best_ckpt = Path(best_run["ckpt_path"])
+        if best_ckpt.exists():
+            final_model_path = save_dir / "best_tcn_model.keras"
+            final_scaler_path = save_dir / "best_tcn_scaler.pkl"
+            final_meta_path = save_dir / "best_tcn_meta.json"
+
+            best_model = tf.keras.models.load_model(str(best_ckpt))
+            best_model.save(str(final_model_path))
+
+            with open(final_scaler_path, "wb") as f:
+                pickle.dump(scaler, f)
+
+            meta = {
+                "seed": int(best_run["seed"]),
+                "val_auc": float(best_run["val_auc"]),
+                "feature_cols": list(feature_cols),
+                "cfg": dict(CFG),
+                "fingerprint": CODE_FINGERPRINT,
+            }
+            final_meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            print("\n=== BEST MODEL SAVED ===")
+            print(f"Seed={meta['seed']} val_auc={meta['val_auc']:.4f}")
+            print(f"Model:  {final_model_path.resolve()}")
+            print(f"Scaler: {final_scaler_path.resolve()}")
+            print(f"Meta:   {final_meta_path.resolve()}\n")
+        else:
+            print("Best checkpoint not found on disk; cannot save best model.")
 
     # NOTE: We intentionally do NOT do "pick best seed" model selection here.
 

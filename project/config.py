@@ -33,6 +33,10 @@ CFG: Dict[str, Any] = {
     # We keep cache under /content/cache to avoid re-downloading market data.
     "CACHE_DIR": "/content/cache",
     "CACHE_ENABLED": True,
+
+    # Smart-Lab fundamentals (true fundamentals: ROE, P/B, EPS, etc.)
+    "USE_SMARTLAB_FUNDAMENTALS": True,
+    "FUND_LAG_DAYS": 1,
     # Multi-horizon training: each horizon becomes a separate "panel" via horizon_norm feature.
     "HORIZONS": [5, 10, 30, 60, 120, 240, 365],
     "THR_MAP": {

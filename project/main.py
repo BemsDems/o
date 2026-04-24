@@ -89,6 +89,36 @@ def main() -> None:
                 lag_days=int(CFG.get("DIV_LAG_DAYS", 1)),
             )
 
+        # Optional: attach Smart-Lab fundamentals (past-only, no leakage).
+        if CFG.get("USE_SMARTLAB_FUNDAMENTALS", False):
+            try:
+                from src.data.fundamentals import (
+                    add_fundamental_features_past_only,
+                    fetch_smartlab_financials,
+                    normalize_fundamentals,
+                )
+
+                print(f"  Loading Smart-Lab financials for {secid}...")
+                fund_msfo = fetch_smartlab_financials(secid, report_type="MSFO", freq="q")
+                fund_rsbu = fetch_smartlab_financials(secid, report_type="RSBU", freq="q")
+
+                fund = normalize_fundamentals(fund_msfo)
+                if fund.empty:
+                    fund = normalize_fundamentals(fund_rsbu)
+
+                if not fund.empty:
+                    df_feat = add_fundamental_features_past_only(
+                        df_feat,
+                        fund,
+                        ticker=secid,
+                        lag_days=int(CFG.get("FUND_LAG_DAYS", 1)),
+                    )
+                    print(f"  {secid}: {len(fund)} quarterly reports attached")
+                else:
+                    print(f"  {secid}: no Smart-Lab data")
+            except Exception as e:  # noqa: BLE001
+                print(f"  [fund] {secid}: fundamentals attach failed ({type(e).__name__}: {e})")
+
         if not macro_df.empty:
             df_feat = df_feat.join(macro_df, how="left")
             for col in macro_cols:
@@ -163,7 +193,24 @@ def main() -> None:
             ["div_yield_ttm", "days_since_last_div", "div_yield_is_missing"] if use_div else []
         )
 
-        feature_cols = [c for c in (technical_cols + fundamental_cols + macro_cols) if c in full.columns]
+        smartlab_cols = [
+            "roe",
+            "pb_ratio",
+            "eps",
+            "value_quality",
+            "fund_age_days",
+            "roe_is_missing",
+            "pb_ratio_is_missing",
+            "eps_is_missing",
+            "value_quality_is_missing",
+        ]
+        smartlab_cols = smartlab_cols if CFG.get("USE_SMARTLAB_FUNDAMENTALS", False) else []
+
+        feature_cols = [
+            c
+            for c in (technical_cols + fundamental_cols + macro_cols + smartlab_cols)
+            if c in full.columns
+        ]
 
         print(f"Features: {len(feature_cols)}")
         print(f"Dataset rows: {len(full)} | pos_rate={float(full['target'].mean()):.1%}")

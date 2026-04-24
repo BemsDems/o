@@ -212,6 +212,36 @@ def main() -> None:
             if c in full.columns
         ]
 
+        # --- Prevent NaN poisoning in scalers/models ---
+        # Smart-Lab fundamentals can have very low coverage (few quarterly reports).
+        # Drop features with too-low coverage, then fill remaining NaNs safely.
+        MIN_COVERAGE = float(CFG.get("FUND_MIN_COVERAGE", 0.05))
+        good_cols: list[str] = []
+        for col in feature_cols:
+            try:
+                cov = float(full[col].notna().mean())
+            except Exception:
+                cov = 0.0
+            if cov < MIN_COVERAGE:
+                print(f"  DROP {col}: coverage={cov:.1%}")
+            else:
+                good_cols.append(col)
+        feature_cols = good_cols
+
+        # Replace inf with NaN (then we'll fill NaN).
+        full[feature_cols] = full[feature_cols].replace([np.inf, -np.inf], np.nan)
+
+        # Fill NaN with median computed on the early train segment (time-safe).
+        n_train_rows = int(len(full) * float(CFG.get("TRAIN_SPLIT", 0.70)))
+        n_train_rows = max(n_train_rows, 1)
+        train_slice = full.iloc[:n_train_rows]
+        for col in feature_cols:
+            if full[col].isna().any():
+                med = float(train_slice[col].median()) if col in train_slice.columns else 0.0
+                if np.isnan(med):
+                    med = 0.0
+                full[col] = full[col].fillna(med)
+
         print(f"Features: {len(feature_cols)}")
         print(f"Dataset rows: {len(full)} | pos_rate={float(full['target'].mean()):.1%}")
 
@@ -224,9 +254,13 @@ def main() -> None:
         # Split per ticker by time.
         m_train, m_val, m_test = time_split_masks(dates_all, secids_all)
 
+        # Final safety: no NaNs before scaling.
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
         scaler = RobustScaler()
         scaler.fit(X[m_train])
         X_scaled = scaler.transform(X)
+        X_scaled = np.nan_to_num(X_scaled, nan=0.0, posinf=0.0, neginf=0.0)
 
         (
             X_tr,

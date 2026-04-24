@@ -48,6 +48,14 @@ CFG: Dict[str, Any] = {
     # Backward compatibility (single-horizon consumers may still use these keys).
     "HORIZON": 5,
     "THR_MOVE": 0.03,
+
+    # Train several separate models in one run (re-using the same downloaded data/features).
+    # Each entry defines an independent binary target.
+    "MULTI_HORIZON_MODELS": [
+        {"name": "short", "HORIZON": 5, "THR_MOVE": 0.03},
+        {"name": "medium", "HORIZON": 30, "THR_MOVE": 0.05},
+        {"name": "long", "HORIZON": 120, "THR_MOVE": 0.12},
+    ],
     "SEQ_LEN": 30,
     "TRAIN_SPLIT": 0.70,
     "VAL_SPLIT": 0.15,

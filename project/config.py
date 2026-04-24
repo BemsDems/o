@@ -10,19 +10,14 @@ import tensorflow as tf
 
 
 CFG: Dict[str, Any] = {
-    # Small test set (CPU/GPU-friendly) to validate the full pipeline end-to-end.
-    # Expand later once training runs stably.
     "TICKERS": [
-        "SBER",
-        "GAZP",
-        "LKOH",
-        "YNDX",
-        "GMKN",
-        "CHMF",
-        "TATN",
-        "PLZL",
-        "OZON",
-        "MTSS",
+        "SBER", "GAZP", "LKOH", "ROSN", "GMKN", "NVTK", "YNDX", "MTSS",
+        "MGNT", "FIVE", "PLZL", "POLY", "ALRS", "CHMF", "NLMK", "MAGN",
+        "VTBR", "MOEX", "PHOR", "RUAL", "OZON", "VKCO", "IRAO", "FEES",
+        "HYDR", "RTKM", "AFLT", "PIKK", "SMLT", "SGZH", "MTLR", "AFKS",
+        "CBOM", "TATN", "SNGS", "BANEP", "TRNFP", "NMTP", "FLOT",
+        "TCSG", "FIXP", "ENPG", "LENT", "RASP", "SELG",
+        "BSPB", "AQUA", "RNFT", "MSNG", "LSRG", "RENI",
     ],
     "START": "2015-01-01",
     # None = up to today (inclusive). Data loader resolves it to date.today().
@@ -34,11 +29,15 @@ CFG: Dict[str, Any] = {
     "CACHE_DIR": "/content/cache",
     "CACHE_ENABLED": True,
     # Multi-horizon training: each horizon becomes a separate "panel" via horizon_norm feature.
-    "HORIZONS": [5, 30, 120],
+    "HORIZONS": [5, 10, 30, 60, 120, 240, 360],
     "THR_MAP": {
         5: 0.03,
+        10: 0.04,
         30: 0.05,
+        60: 0.08,
         120: 0.12,
+        240: 0.18,
+        360: 0.25,
     },
 
     # Backward compatibility (single-horizon consumers may still use these keys).
@@ -56,8 +55,8 @@ CFG: Dict[str, Any] = {
 
     # Ensemble is a defensible way to improve stability without "picking the best seed".
     "USE_ENSEMBLE": True,
-    # Start with 1 seed to verify training end-to-end; scale up later.
-    "ENSEMBLE_SEEDS": [42],
+    # Full ensemble.
+    "ENSEMBLE_SEEDS": [42, 43, 44, 45, 46],
 
     # Early stopping tuned for fast overfitting regimes.
     "ES_PATIENCE": 5,

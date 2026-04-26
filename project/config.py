@@ -13,16 +13,33 @@ CFG: Dict[str, Any] = {
     # Small test set (CPU/GPU-friendly) to validate the full pipeline end-to-end.
     # Expand later once training runs stably.
     "TICKERS": [
+        # Core liquid MOEX tickers (expanded set)
         "SBER",
+        "T",
+        "VTBR",
+        "MOEX",
         "GAZP",
         "LKOH",
-        "YNDX",
+        "ROSN",
+        "NVTK",
+        "TATN",
+        "YDEX",
+        "VKCO",
+        "POSI",
         "GMKN",
         "CHMF",
-        "TATN",
+        "NLMK",
+        "MAGN",
         "PLZL",
-        "OZON",
+        "X5",
+
+        # Extended to 24 tickers
+        "MGNT",
         "MTSS",
+        "RTKM",
+        "IRAO",
+        "HYDR",
+        "AFLT",
     ],
     "START": "2015-01-01",
     # None = up to today (inclusive). Data loader resolves it to date.today().

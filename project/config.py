@@ -84,7 +84,7 @@ CFG: Dict[str, Any] = {
     "VAL_SPLIT": 0.15,
     # Training speed defaults (CPU-friendly). On Colab GPU you can lower batch and/or increase seeds.
     "BATCH_SIZE": 256,
-    "EPOCHS": 50,
+    "EPOCHS": 100,
     "LR": 3e-4,
     "SEED": 42,
     "N_RUNS": 3,
@@ -95,8 +95,8 @@ CFG: Dict[str, Any] = {
     "ENSEMBLE_SEEDS": [42, 43, 44, 45, 46],
 
     # Early stopping tuned for fast overfitting regimes.
-    "ES_PATIENCE": 5,
-    "ES_MIN_DELTA": 0.005,
+    "ES_PATIENCE": 10,
+    "ES_MIN_DELTA": 0.001,
     "FEE": 0.001,
     "EXTENDED_DIAGNOSTICS": True,
 }

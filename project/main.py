@@ -94,23 +94,44 @@ def main() -> None:
             try:
                 from src.data.fundamentals import (
                     add_fundamental_features_past_only,
+                    combine_fundamental_sources,
                     fetch_smartlab_financials,
                     normalize_fundamentals,
                 )
 
-                print(f"  Loading Smart-Lab financials for {secid}...")
-                fund_msfo = fetch_smartlab_financials(secid, report_type="MSFO", freq="q")
-                fund_rsbu = fetch_smartlab_financials(secid, report_type="RSBU", freq="q")
+                fund_ticker = secid.split("_h")[0] if "_h" in str(secid) else secid
 
-                fund = normalize_fundamentals(fund_msfo)
-                if fund.empty:
-                    fund = normalize_fundamentals(fund_rsbu)
+                print(f"  Loading Smart-Lab financials for {fund_ticker}...")
+                fund_msfo = fetch_smartlab_financials(fund_ticker, report_type="MSFO", freq="q")
+                fund_rsbu = fetch_smartlab_financials(fund_ticker, report_type="RSBU", freq="q")
+
+                print(
+                    f"  {fund_ticker}: MSFO rows={len(fund_msfo)} | "
+                    f"RSBU rows={len(fund_rsbu)}"
+                )
+
+                fund = combine_fundamental_sources(
+                    normalize_fundamentals(fund_msfo),
+                    normalize_fundamentals(fund_rsbu),
+                )
+
+                print(
+                    f"  {fund_ticker}: combined rows={len(fund)} | "
+                    f"publish_date range=[{fund['publish_date'].min() if not fund.empty else None} .. "
+                    f"{fund['publish_date'].max() if not fund.empty else None}]"
+                )
+
+                if len(fund) and len(df_feat):
+                    print(
+                        f"  {fund_ticker}: WARNING low coverage source — "
+                        "quarterly reports are sparse relative to daily history"
+                    )
 
                 if not fund.empty:
                     df_feat = add_fundamental_features_past_only(
                         df_feat,
                         fund,
-                        ticker=secid,
+                        ticker=fund_ticker,
                         lag_days=int(CFG.get("FUND_LAG_DAYS", 1)),
                     )
                     print(f"  {secid}: {len(fund)} quarterly reports attached")

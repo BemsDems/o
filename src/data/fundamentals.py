@@ -109,7 +109,11 @@ def _to_float_ru(x):
     s = str(x).strip()
     if s in {"", "-", "—", "–", "nan", "None"}:
         return np.nan
-    s = s.replace(" ", "")
+    # Smart-Lab HTML часто содержит неразрывные пробелы и узкие NBSP, из-за
+    # которых числа могут silently парситься в NaN.
+    s = s.replace(" ", "")
+    s = s.replace("\xa0", "")
+    s = s.replace(" ", "")
     s = s.replace("%", "")
     s = s.replace(",", ".")
     s = re.sub(r"[^\d\.\-]", "", s)
@@ -140,8 +144,27 @@ def fetch_smartlab_financials(
     if not tables:
         return pd.DataFrame()
 
-    tbl = max(tables, key=lambda x: x.shape[1]).copy()
-    tbl.columns = [str(c).strip() for c in tbl.columns]
+    # max(..., key=shape[1]) хрупко: на странице могут быть другие широкие таблицы.
+    # Выбираем таблицу, где в первой колонке встречаются характерные метрики.
+    candidate_tables = []
+    key_patterns = ["выручка", "ebitda", "чистая прибыль", "eps", "roe", "дата отч"]
+
+    for t in tables:
+        tt = t.copy()
+        tt.columns = [str(c).strip() for c in tt.columns]
+        if tt.empty:
+            continue
+
+        first_col = tt.columns[0]
+        sample = " ".join(tt[first_col].astype(str).head(20).tolist()).lower().replace("ё", "е")
+        score = sum(int(p in sample) for p in key_patterns)
+        candidate_tables.append((score, tt.shape[1], tt))
+
+    if not candidate_tables:
+        return pd.DataFrame()
+
+    candidate_tables.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    tbl = candidate_tables[0][2].copy()
 
     metric_col = tbl.columns[0]
     tbl[metric_col] = tbl[metric_col].astype(str).str.strip()
@@ -166,32 +189,39 @@ def fetch_smartlab_financials(
     if df.empty:
         return df
 
-    date_mask = df["metric_ru"].str.contains("Дата отчета", case=False, na=False)
+    date_mask = df["metric_ru"].str.contains(r"дата отч[её]та|report date", case=False, na=False)
     date_map = df[date_mask][["period", "value_raw"]].rename(columns={"value_raw": "publish_date"}).copy()
     if not date_map.empty:
         date_map["publish_date"] = pd.to_datetime(date_map["publish_date"], dayfirst=True, errors="coerce")
 
     df = df[~date_mask].copy()
 
+    def _norm_metric_label(x: str) -> str:
+        x = str(x).strip().lower()
+        x = x.replace("ё", "е")
+        x = re.sub(r"\s+", " ", x)
+        return x
+
     metric_map = {
-        "Выручка": "revenue",
-        "EBITDA": "ebitda",
-        "Чистая прибыль": "net_income",
-        "Чистая прибыль н/с": "net_income",
-        "EPS": "eps",
-        "ROE": "roe",
-        "P/B": "pb_ratio",
-        "P/BV": "pb_ratio",
-        "Чистая рентаб": "net_margin",
-        "Чистая маржа": "net_margin",
-        "Долг/EBITDA": "debt_ebitda",
-        "Долг": "debt",
-        "Чистый долг": "net_debt",
+        "выручка": "revenue",
+        "ebitda": "ebitda",
+        "чистая прибыль н/с": "net_income",
+        "чистая прибыль": "net_income",
+        "eps": "eps",
+        "roe": "roe",
+        "p/bv": "pb_ratio",
+        "p/b": "pb_ratio",
+        "чистая рентаб": "net_margin",
+        "чистая маржа": "net_margin",
+        "долг/ebitda": "debt_ebitda",
+        "чистый долг": "net_debt",
+        "долг": "debt",
     }
 
     def map_metric(x: str) -> Optional[str]:
+        x_norm = _norm_metric_label(x)
         for k, v in metric_map.items():
-            if x.startswith(k):
+            if x_norm.startswith(k):
                 return v
         return None
 

@@ -98,6 +98,9 @@ def build_features(
     imo: pd.DataFrame,
     key_rate: pd.DataFrame,
     divs: pd.DataFrame,
+    sector_idx: pd.DataFrame | None = None,
+    ruonia: pd.DataFrame | None = None,
+    usd_cbr: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     df = stock_df.copy()
 
@@ -155,6 +158,24 @@ def build_features(
 
     df["stock_vs_imoex_5"] = df["ret_5"] - df["imoex_ret_5"]
 
+    # Sector index context (optional)
+    if sector_idx is not None and not sector_idx.empty:
+        sec_close = sector_idx["Close"].reindex(df.index).ffill()
+        df["sector_ret_1"] = sec_close.pct_change(1)
+        df["sector_ret_5"] = sec_close.pct_change(5)
+        df["sector_ret_20"] = sec_close.pct_change(20)
+
+        df["stock_vs_sector_5"] = df["ret_5"] - df["sector_ret_5"]
+        df["stock_vs_sector_20"] = df["ret_20"] - df["sector_ret_20"]
+        df["sector_vs_imoex_5"] = df["sector_ret_5"] - df["imoex_ret_5"]
+    else:
+        df["sector_ret_1"] = np.nan
+        df["sector_ret_5"] = np.nan
+        df["sector_ret_20"] = np.nan
+        df["stock_vs_sector_5"] = np.nan
+        df["stock_vs_sector_20"] = np.nan
+        df["sector_vs_imoex_5"] = np.nan
+
     # Macro: key rate derivatives only
     if key_rate is None or key_rate.empty:
         df["key_rate"] = np.nan
@@ -168,6 +189,29 @@ def build_features(
 
     df["key_rate_chg"] = df["key_rate"].diff()
     df["rate_rising"] = (df["key_rate_chg"] > 0).astype(int)
+
+    # Official macro (CBR) extras (optional)
+    if ruonia is not None and not ruonia.empty:
+        r = ruonia.copy()
+        r["date"] = pd.to_datetime(r["date"], errors="coerce")
+        r = r.dropna(subset=["date"]).drop_duplicates(subset=["date"]).sort_values("date")
+        r = r.set_index("date").sort_index().reindex(df.index, method="ffill")
+        df["ruonia"] = pd.to_numeric(r.get("ruonia"), errors="coerce")
+        df["ruonia_chg_5"] = df["ruonia"].diff(5)
+    else:
+        df["ruonia"] = np.nan
+        df["ruonia_chg_5"] = np.nan
+
+    if usd_cbr is not None and not usd_cbr.empty:
+        u = usd_cbr.copy()
+        u["date"] = pd.to_datetime(u["date"], errors="coerce")
+        u = u.dropna(subset=["date"]).drop_duplicates(subset=["date"]).sort_values("date")
+        u = u.set_index("date").sort_index().reindex(df.index, method="ffill")
+        df["usd_cbr"] = pd.to_numeric(u.get("usd_cbr"), errors="coerce")
+        df["usd_cbr_ret_5"] = df["usd_cbr"].pct_change(5)
+    else:
+        df["usd_cbr"] = np.nan
+        df["usd_cbr_ret_5"] = np.nan
 
     # Dividends (optional, past-only)
     if divs is not None and not divs.empty:

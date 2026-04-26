@@ -8,8 +8,16 @@ import pandas as pd
 from sklearn.preprocessing import RobustScaler
 from sklearn.utils.class_weight import compute_class_weight
 
-from src.config.settings import CFG, BASE_FEATURES
-from src.data.loaders import cbr_key_rate_range, load_candles_moexalgo, moex_iss_dividends
+from src.config.settings import CFG, BASE_FEATURES, DIVIDEND_FEATURES
+from src.data.loaders import (
+    SECTOR_INDEX_MAP,
+    cbr_key_rate_range,
+    cbr_ruonia_range,
+    cbr_usd_rate_range,
+    load_candles_moexalgo,
+    load_sector_index_moex,
+    moex_iss_dividends,
+)
 from src.features.engineering import build_features
 from src.features.target import add_target, make_windows_aligned, time_splits
 
@@ -26,6 +34,11 @@ def prepare_dataset_once() -> Dict[str, Any]:
     key_rate = cbr_key_rate_range(CFG["START"], CFG["END"])
     print("Key rate rows:", len(key_rate))
 
+    print("\nLoading CBR RUONIA + official USD (best-effort)...")
+    ruonia = cbr_ruonia_range(CFG["START"], CFG["END"])
+    usd_cbr = cbr_usd_rate_range(CFG["START"], CFG["END"])
+    print("RUONIA rows:", len(ruonia), "USD_CBR rows:", len(usd_cbr))
+
     if CFG.get("USE_DIVIDENDS", False):
         print("\nLoading MOEX dividends...")
         divs = moex_iss_dividends(CFG["TICKER"])
@@ -34,13 +47,23 @@ def prepare_dataset_once() -> Dict[str, Any]:
         print("\nSkipping dividends: USE_DIVIDENDS=False")
         divs = pd.DataFrame(columns=["date", "dividend_rub", "currency"])
 
+    sector_code = SECTOR_INDEX_MAP.get(str(CFG["TICKER"]))
+    sector_idx = (
+        load_sector_index_moex(sector_code, CFG["START"], CFG["END"])
+        if sector_code
+        else pd.DataFrame()
+    )
+
     print("\nBuilding features (Russian sources only)...")
-    feat = build_features(px, usd, imo, key_rate, divs)
+    feat = build_features(px, usd, imo, key_rate, divs, sector_idx=sector_idx, ruonia=ruonia, usd_cbr=usd_cbr)
     feat = add_target(feat, CFG["HORIZON"], CFG["THR_MOVE"])
     print("Final dataset:", feat.shape)
     print("Class share (BUY=1):", float(feat["Target"].mean().round(3)))
 
-    FEATURES = [c for c in BASE_FEATURES if c in feat.columns]
+    FEATURES = (
+        [c for c in BASE_FEATURES if c in feat.columns]
+        + [c for c in DIVIDEND_FEATURES if c in feat.columns]
+    )
 
     print("\nSELECTED FEATURES:")
     print(FEATURES)
@@ -108,4 +131,3 @@ def prepare_dataset_once() -> Dict[str, Any]:
         "clip_lo": lo,
         "clip_hi": hi,
     }
-

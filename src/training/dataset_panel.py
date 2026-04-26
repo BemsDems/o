@@ -8,8 +8,16 @@ import pandas as pd
 from sklearn.preprocessing import RobustScaler
 from sklearn.utils.class_weight import compute_class_weight
 
-from src.config.settings import CFG, BASE_FEATURES, FUND_FEATURES
-from src.data.loaders import cbr_key_rate_range, load_candles_moexalgo, moex_iss_dividends
+from src.config.settings import CFG, BASE_FEATURES, DIVIDEND_FEATURES
+from src.data.loaders import (
+    SECTOR_INDEX_MAP,
+    cbr_key_rate_range,
+    cbr_ruonia_range,
+    cbr_usd_rate_range,
+    load_candles_moexalgo,
+    load_sector_index_moex,
+    moex_iss_dividends,
+)
 from src.data.fundamentals import (
     add_fundamental_features_past_only,
     combine_fundamental_sources,
@@ -35,8 +43,15 @@ def prepare_dataset_once_panel() -> Dict[str, Any]:
     key_rate = cbr_key_rate_range(CFG["START"], CFG["END"])
     print("Key rate rows:", len(key_rate))
 
+    print("\nLoading CBR RUONIA + official USD (best-effort)...")
+    ruonia = cbr_ruonia_range(CFG["START"], CFG["END"])
+    usd_cbr = cbr_usd_rate_range(CFG["START"], CFG["END"])
+    print("RUONIA rows:", len(ruonia), "USD_CBR rows:", len(usd_cbr))
+
     px_map: Dict[str, pd.DataFrame] = {}
     panel_parts = []
+
+    sector_cache: Dict[str, pd.DataFrame] = {}
 
     tickers = list(CFG.get("TICKERS") or [])
     if not tickers:
@@ -57,7 +72,24 @@ def prepare_dataset_once_panel() -> Dict[str, Any]:
         else:
             divs = pd.DataFrame(columns=["date", "dividend_rub", "currency"])
 
-        feat_i = build_features(px, usd, imo, key_rate, divs)
+        sector_code = SECTOR_INDEX_MAP.get(str(ticker))
+        if sector_code:
+            if sector_code not in sector_cache:
+                sector_cache[sector_code] = load_sector_index_moex(sector_code, CFG["START"], CFG["END"])
+            sector_idx = sector_cache.get(sector_code)
+        else:
+            sector_idx = pd.DataFrame()
+
+        feat_i = build_features(
+            px,
+            usd,
+            imo,
+            key_rate,
+            divs,
+            sector_idx=sector_idx,
+            ruonia=ruonia,
+            usd_cbr=usd_cbr,
+        )
 
         # Fundamentals (past-only attachment, no leakage)
         if CFG.get("USE_FUNDAMENTALS", False):
@@ -142,61 +174,36 @@ def prepare_dataset_once_panel() -> Dict[str, Any]:
     ticker_dummies = pd.get_dummies(feat["ticker"], prefix="ticker", dtype=float)
     feat = pd.concat([feat, ticker_dummies], axis=1)
 
-    fund_core_cols = [
-        "roe",
-        "pb_ratio",
-        "value_quality",
-        "eps",
-        "fund_age_days",
+    # Cross-sectional (panel) features: rank/z-score within each date.
+    # This is often a more stable substitute for sparse quarterly fundamentals.
+    rank_cols = [
+        "ret_5",
+        "ret_20",
+        "vol_rel",
+        "rsi_14",
+        "bb_pos",
+        "stock_vs_imoex_5",
     ]
-    present_fund_core = [c for c in fund_core_cols if c in feat.columns]
 
-    if present_fund_core:
-        print("\nFUNDAMENTAL COVERAGE BY TICKER BEFORE FILL (non-null share):")
-        print("\nFUNDAMENTAL FEATURE LIST USED:")
-        print([c for c in FUND_FEATURES if c in feat.columns])
-        cov_before = feat.groupby("ticker")[present_fund_core].apply(lambda x: x.notna().mean())
-        print(cov_before.to_string())
-
-        # Make sure fund columns are numeric and fill NaNs with TRAIN median (past-only).
-        for c in present_fund_core:
-            feat[c] = pd.to_numeric(feat[c], errors="coerce")
-            feat[c] = feat[c].replace([np.inf, -np.inf], np.nan)
-
-            if c == "fund_age_days":
-                fill_value = float(feat.loc[feat["split"] == "train", c].max())
-                if pd.isna(fill_value):
-                    fill_value = 9999.0
-            else:
-                fill_value = float(feat.loc[feat["split"] == "train", c].median())
-                if pd.isna(fill_value):
-                    fill_value = 0.0
-
-            feat[c] = feat[c].fillna(fill_value)
-
-        print("\nFUNDAMENTAL COVERAGE BY TICKER AFTER FILL (non-null share):")
-        cov_after = feat.groupby("ticker")[present_fund_core].apply(lambda x: x.notna().mean())
-        print(cov_after.to_string())
+    for c in rank_cols:
+        if c in feat.columns:
+            feat[f"{c}_cs_rank"] = feat.groupby("date")[c].rank(pct=True)
+            feat[f"{c}_cs_z"] = feat.groupby("date")[c].transform(
+                lambda x: (x - x.mean()) / (x.std(ddof=0) + 1e-12)
+            )
 
     ticker_features = sorted(ticker_dummies.columns.tolist())
-    fund_features_present = [c for c in FUND_FEATURES if c in feat.columns]
 
     FEATURES = (
         [c for c in BASE_FEATURES if c in feat.columns]
-        + fund_features_present
+        + [c for c in DIVIDEND_FEATURES if c in feat.columns]
         + ticker_features
     )
     print("\nSELECTED FEATURES:")
     print(FEATURES)
     print(f"Признаков используется: {len(FEATURES)}")
-    print(f"Fundamental features added: {fund_features_present}")
+    print(f"Dividend features added: {[c for c in DIVIDEND_FEATURES if c in feat.columns]}")
     print(f"Ticker features added: {ticker_features}")
-
-    if CFG.get("USE_FUNDAMENTALS", False):
-        expected_fund = {"roe", "pb_ratio", "value_quality", "eps", "fund_age_days"}
-        missing_fund = sorted(expected_fund - set(FEATURES))
-        if missing_fund:
-            print(f"WARNING: some expected fundamental features are missing: {missing_fund}")
 
     scaler = RobustScaler()
 

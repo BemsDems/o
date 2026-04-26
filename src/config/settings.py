@@ -79,22 +79,42 @@ BASE_FEATURES = [
     "usd_ret_1", "usd_ret_5",
     "imoex_ret_1", "imoex_ret_5", "imoex_ret_20",
     "stock_vs_imoex_5",
+
+    # sector-relative context
+    "sector_ret_1",
+    "sector_ret_5",
+    "sector_ret_20",
+    "stock_vs_sector_5",
+    "stock_vs_sector_20",
+    "sector_vs_imoex_5",
+
+    # cross-sectional (panel) features
+    "ret_5_cs_rank",
+    "ret_20_cs_rank",
+    "vol_rel_cs_rank",
+    "rsi_14_cs_rank",
+    "bb_pos_cs_rank",
+    "stock_vs_imoex_5_cs_rank",
+
+    "ret_5_cs_z",
+    "ret_20_cs_z",
+    "vol_rel_cs_z",
+    "rsi_14_cs_z",
+    "bb_pos_cs_z",
+    "stock_vs_imoex_5_cs_z",
     "key_rate_chg", "rate_rising",
+
+    # official macro extras (CBR)
+    "ruonia_chg_5",
+    "usd_cbr_ret_5",
 ]
 
 
-# Fundamental features (single source of truth)
-FUND_FEATURES = [
-    "roe",
-    "pb_ratio",
-    "value_quality",
-    "eps",
-    "fund_age_days",
-
-    "roe_is_missing",
-    "pb_ratio_is_missing",
-    "value_quality_is_missing",
-    "eps_is_missing",
+# Dividend features (single source of truth)
+DIVIDEND_FEATURES = [
+    "div_yield_ttm",
+    "days_since_last_div",
+    "div_yield_is_missing",
 ]
 
 

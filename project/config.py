@@ -23,7 +23,7 @@ CFG: Dict[str, Any] = {
         "ROSN",
         "NVTK",
         "TATN",
-        "YDEX",
+        "YNDX",
         "VKCO",
         "POSI",
         "GMKN",

@@ -556,7 +556,6 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
         "logret_5",
         "logret_10",
         "trend_up_20",
-        "trend_up_50",
         "trend_up_200",
         "vol_rel",
         "vol_spike",

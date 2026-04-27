@@ -375,6 +375,10 @@ def main() -> None:
                 best_model = model
 
         prob_ens = np.mean(np.vstack(prob_test_list), axis=0)
+
+        # Адаптивный порог: top-30% по вероятности
+        adaptive_thr = float(np.percentile(prob_ens, 70))
+        print(f" Adaptive threshold (p70): {adaptive_thr:.3f}")
         test_auc = float(roc_auc_score(y_te, prob_ens)) if len(np.unique(y_te)) > 1 else 0.0
 
         print(f"\n=== {model_name.upper()} RESULT ===")
@@ -392,7 +396,7 @@ def main() -> None:
                 r_te,
                 d_te,
                 s_te,
-                threshold=0.5,
+                threshold=adaptive_thr,
                 fee=float(CFG.get("FEE", 0.001)),
             )
             print(bt.to_string(index=False))

@@ -53,6 +53,8 @@ CFG: Dict[str, Any] = {
 
     # Smart-Lab fundamentals (true fundamentals: ROE, P/B, EPS, etc.)
     "USE_SMARTLAB_FUNDAMENTALS": False,
+    "USE_YAHOO_FUNDAMENTALS": True,
+    "YAHOO_FUND_LAG_DAYS": 1,
     "FUND_LAG_DAYS": 1,
     # Drop fundamental-derived features if coverage is too low to avoid NaN poisoning.
     "FUND_MIN_COVERAGE": 0.05,

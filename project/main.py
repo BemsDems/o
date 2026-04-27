@@ -19,6 +19,11 @@ from project.data_loader import (
     fetch_moex_candles,
     make_target,
 )
+from project.yahoo_fundamentals import (
+    YAHOO_FUND_FEATURES,
+    add_yahoo_features_past_only,
+    fetch_yahoo_fundamentals,
+)
 from project.metrics import evaluate_global, improved_backtest_per_ticker, per_ticker_metrics
 from project.model import build_tcn_model
 from project.sequences import make_sequences_multi_ticker, time_split_masks
@@ -71,6 +76,7 @@ def main() -> None:
 
     # Build features per ticker ONCE (features don't depend on horizon)
     ticker_features: dict[str, pd.DataFrame] = {}
+    yahoo_cache = {} if CFG.get("USE_YAHOO_FUNDAMENTALS", False) else None
     for secid in CFG["TICKERS"]:
         secid = str(secid)
         print(f"Loading {secid}...")
@@ -89,8 +95,25 @@ def main() -> None:
                 lag_days=int(CFG.get("DIV_LAG_DAYS", 1)),
             )
 
-        # Optional: attach Smart-Lab fundamentals (past-only, no leakage).
-        if CFG.get("USE_SMARTLAB_FUNDAMENTALS", False):
+        if CFG.get("USE_YAHOO_FUNDAMENTALS", False):
+            try:
+                fund_df = fetch_yahoo_fundamentals(secid, cache=yahoo_cache)
+                if not fund_df.empty:
+                    df_feat = add_yahoo_features_past_only(
+                        df_feat,
+                        fund_df,
+                        lag_days=int(CFG.get("YAHOO_FUND_LAG_DAYS", 1)),
+                    )
+                    print(f"  {secid}: {len(fund_df)} Yahoo reports attached")
+                else:
+                    df_feat = add_yahoo_features_past_only(df_feat, None)
+                    print(f"  {secid}: no Yahoo data, zeros filled")
+            except Exception as e:  # noqa: BLE001
+                print(f"  [Yahoo] {secid}: failed ({e})")
+                df_feat = add_yahoo_features_past_only(df_feat, None)
+
+        # Optional fallback: attach Smart-Lab fundamentals (past-only, no leakage).
+        elif CFG.get("USE_SMARTLAB_FUNDAMENTALS", False):
             try:
                 from src.data.fundamentals import (
                     add_fundamental_features_past_only,
@@ -214,22 +237,28 @@ def main() -> None:
             ["div_yield_ttm", "days_since_last_div", "div_yield_is_missing"] if use_div else []
         )
 
-        smartlab_cols = [
-            "roe",
-            "pb_ratio",
-            "eps",
-            "value_quality",
-            "fund_age_days",
-            "roe_is_missing",
-            "pb_ratio_is_missing",
-            "eps_is_missing",
-            "value_quality_is_missing",
-        ]
-        smartlab_cols = smartlab_cols if CFG.get("USE_SMARTLAB_FUNDAMENTALS", False) else []
+        yahoo_cols: list[str] = []
+        if CFG.get("USE_YAHOO_FUNDAMENTALS", False):
+            yahoo_cols = [c for c in YAHOO_FUND_FEATURES if c in full.columns]
+            print(f"  Yahoo features present: {len(yahoo_cols)}")
+
+        smartlab_cols = []
+        if CFG.get("USE_SMARTLAB_FUNDAMENTALS", False):
+            smartlab_cols = [
+                "roe",
+                "pb_ratio",
+                "eps",
+                "value_quality",
+                "fund_age_days",
+                "roe_is_missing",
+                "pb_ratio_is_missing",
+                "eps_is_missing",
+                "value_quality_is_missing",
+            ]
 
         feature_cols = [
             c
-            for c in (technical_cols + fundamental_cols + macro_cols + smartlab_cols)
+            for c in (technical_cols + fundamental_cols + macro_cols + yahoo_cols + smartlab_cols)
             if c in full.columns
         ]
 

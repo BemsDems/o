@@ -53,7 +53,7 @@ CFG: Dict[str, Any] = {
 
     # Smart-Lab fundamentals (true fundamentals: ROE, P/B, EPS, etc.)
     "USE_SMARTLAB_FUNDAMENTALS": False,
-    "USE_YAHOO_FUNDAMENTALS": True,
+    "USE_YAHOO_FUNDAMENTALS": False,
     "YAHOO_FUND_LAG_DAYS": 1,
     "YAHOO_FUND_DROP": [
         "debt_to_equity",

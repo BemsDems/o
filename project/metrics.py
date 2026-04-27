@@ -10,8 +10,6 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from project.config import CFG
-
 
 def _safe_auc(y_true, y_prob):
     if len(np.unique(y_true)) < 2:
@@ -51,8 +49,8 @@ def per_ticker_metrics(y_true, y_prob, secids):
     return pd.DataFrame(rows).sort_values("secid")
 
 
-def improved_backtest_per_ticker(y_prob, fwd_ret, dates, secids, threshold, fee):
-    horizon = int(CFG["HORIZON"])
+def improved_backtest_per_ticker(y_prob, fwd_ret, dates, secids, threshold, fee, horizon):
+    horizon = int(horizon)
     results = []
 
     for secid in sorted(set(secids)):
@@ -104,4 +102,3 @@ def improved_backtest_per_ticker(y_prob, fwd_ret, dates, secids, threshold, fee)
         )
 
     return pd.DataFrame(results)
-

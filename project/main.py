@@ -239,8 +239,13 @@ def main() -> None:
 
         yahoo_cols: list[str] = []
         if CFG.get("USE_YAHOO_FUNDAMENTALS", False):
-            yahoo_cols = [c for c in YAHOO_FUND_FEATURES if c in full.columns]
+            yahoo_drop = set(CFG.get("YAHOO_FUND_DROP", []))
+            yahoo_cols = [
+                c for c in YAHOO_FUND_FEATURES if c in full.columns and c not in yahoo_drop
+            ]
             print(f"  Yahoo features present: {len(yahoo_cols)}")
+            if yahoo_drop:
+                print(f"  Yahoo features dropped: {sorted(yahoo_drop)}")
 
         smartlab_cols = []
         if CFG.get("USE_SMARTLAB_FUNDAMENTALS", False):
@@ -427,6 +432,7 @@ def main() -> None:
                 s_te,
                 threshold=adaptive_thr,
                 fee=float(CFG.get("FEE", 0.001)),
+                horizon=horizon,
             )
             print(bt.to_string(index=False))
         except Exception as e:

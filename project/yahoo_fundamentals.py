@@ -102,28 +102,13 @@ _CASHFLOW_ROWS = {
     "free_cashflow": ["Free Cash Flow"],
 }
 
+# Keep ONLY the 5 independent fundamental axes.
 YAHOO_FUND_FEATURES = [
-    "roe_calc",
-    "debt_to_equity",
-    "net_margin",
-    "revenue_growth_yoy",
-    "cash_ratio",
-    # Cross-sectional ranks (by date) are computed later in project/main.py
-    # after joining multiple tickers into a single panel.
-    "roe_cs_rank",
-    "net_margin_cs_rank",
-    "debt_to_equity_cs_rank",
-    "fcf_margin",
-    "fund_age_days",
-    "roe_calc_is_missing",
-    "debt_to_equity_is_missing",
-    "net_margin_is_missing",
-    "revenue_growth_yoy_is_missing",
-    "cash_ratio_is_missing",
-    "roe_cs_rank_is_missing",
-    "net_margin_cs_rank_is_missing",
-    "debt_to_equity_cs_rank_is_missing",
-    "fcf_margin_is_missing",
+    "roe_calc",  # profitability (ROE)
+    "net_margin",  # sales margin
+    "debt_to_equity",  # leverage
+    "revenue_growth_yoy",  # growth (YoY)
+    "cash_ratio",  # liquidity
 ]
 
 
@@ -261,9 +246,8 @@ def fetch_yahoo_fundamentals(ticker: str, cache: dict | None = None) -> pd.DataF
     out["roe_calc"] = out["net_income"] / out["total_equity"].replace(0, np.nan)
     out["debt_to_equity"] = out["total_debt"] / out["total_equity"].replace(0, np.nan)
     out["net_margin"] = out["net_income"] / out["revenue"].replace(0, np.nan)
-    # YoY for quarterly reports: compare to same quarter a year ago.
-    # (pct_change(4) for quarterly series)
-    out["revenue_growth_yoy"] = out["revenue"].pct_change(4)
+    # YoY for quarterly reports: compare to the same quarter a year ago.
+    out["revenue_growth_yoy"] = out.groupby("ticker")["revenue"].pct_change(4)
     out["cash_ratio"] = out["cash"] / out["total_assets"].replace(0, np.nan)
 
     for col in [
@@ -274,13 +258,6 @@ def fetch_yahoo_fundamentals(ticker: str, cache: dict | None = None) -> pd.DataF
         "cash_ratio",
     ]:
         out[col] = out[col].replace([np.inf, -np.inf], np.nan)
-
-    fcf = out.get("free_cashflow", pd.Series(dtype=float))
-    if fcf.isna().all() and "operating_cashflow" in out.columns and "capex" in out.columns:
-        fcf = out["operating_cashflow"] - out["capex"].abs()
-    out["free_cashflow"] = fcf
-
-    out["fcf_margin"] = out["free_cashflow"] / out["revenue"].replace(0, np.nan)
 
     n = len(out)
     rng = ""
@@ -301,7 +278,7 @@ def add_yahoo_features_past_only(
 ) -> pd.DataFrame:
     if fund_df is None or fund_df.empty:
         for col in YAHOO_FUND_FEATURES:
-            df_feat[col] = 1 if col.endswith("_is_missing") else 0.0
+            df_feat[col] = 0.0
         return df_feat
 
     f = fund_df.copy()
@@ -315,42 +292,15 @@ def add_yahoo_features_past_only(
 
     merged = pd.merge_asof(
         d.reset_index(drop=True),
-        f[
-            [
-                "report_date",
-                "roe_calc",
-                "debt_to_equity",
-                "net_margin",
-                "revenue_growth_yoy",
-                "cash_ratio",
-                "fcf_margin",
-            ]
-        ],
+        f[["report_date", "roe_calc", "net_margin", "debt_to_equity", "revenue_growth_yoy", "cash_ratio"]],
         left_on="_date",
         right_on="report_date",
         direction="backward",
     )
 
-    merged["fund_age_days"] = (merged["_date"] - merged["report_date"]).dt.days.fillna(9999).astype(float)
-
-    # Core fundamentals (absolute values). Cross-sectional ranks are computed later
-    # on a multi-ticker panel (need same-date peers).
-    fund_core = [
-        "roe_calc",
-        "debt_to_equity",
-        "net_margin",
-        "revenue_growth_yoy",
-        "cash_ratio",
-        "fcf_margin",
-    ]
-    for col in fund_core:
-        merged[f"{col}_is_missing"] = merged[col].isna().astype(int)
-        merged[col] = merged[col].fillna(0.0)
-
-    # Placeholders for cross-sectional rank features.
-    for col in ["roe_cs_rank", "net_margin_cs_rank", "debt_to_equity_cs_rank"]:
-        merged[col] = 0.0
-        merged[f"{col}_is_missing"] = 1
+    # Fill missing fundamentals with 0.0 (no *_is_missing flags by design).
+    for col in YAHOO_FUND_FEATURES:
+        merged[col] = merged[col].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     merged = merged.set_index("_date")
     merged.index.name = df_feat.index.name

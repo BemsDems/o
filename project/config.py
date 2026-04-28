@@ -56,7 +56,13 @@ CFG: Dict[str, Any] = {
     "USE_YAHOO_FUNDAMENTALS": True,
     "YAHOO_FUND_LAG_DAYS": 1,
     "YAHOO_FUND_DROP": [
-        # Keep list empty: YAHOO_FUND_FEATURES already contains only desired features.
+        "debt_to_equity",
+        "debt_to_equity_is_missing",
+        "fcf_margin",
+        "fcf_margin_is_missing",
+        "fund_age_days",
+        "net_margin_is_missing",
+        "roe_calc_is_missing",
     ],
     "FUND_LAG_DAYS": 1,
     # Drop fundamental-derived features if coverage is too low to avoid NaN poisoning.

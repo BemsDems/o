@@ -545,14 +545,6 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
 
     full = pd.concat(rows, axis=0).sort_values(["secid", "date"]).reset_index(drop=True)
 
-    # Cross-sectional ranks for fundamentals: fundamentals work better relatively.
-    # NOTE: fillna(0.5) = neutral percentile when data missing.
-    for col in ["roe_calc", "net_margin", "debt_to_equity"]:
-        if col in full.columns:
-            full[f"{col}_cs_rank"] = (
-                full.groupby("date")[col].rank(pct=True).astype(float).fillna(0.5)
-            )
-
     # Ensure sequences/splits don't mix different horizons for the same ticker.
     if "horizon_days" in full.columns:
         full["secid"] = full["secid"].astype(str) + "_h" + full["horizon_days"].astype(str)
@@ -574,22 +566,7 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
         "volatility_20",
     ]
     fundamental_cols = ["div_yield_ttm", "days_since_last_div", "div_yield_is_missing"] if use_div_fund else []
-    # Yahoo fundamentals (absolute + CS ranks)
-    yahoo_cols = [
-        c
-        for c in [
-            "roe_calc",
-            "net_margin",
-            "debt_to_equity",
-            "revenue_growth_yoy",
-            "cash_ratio",
-            "roe_calc_cs_rank",
-            "net_margin_cs_rank",
-            "debt_to_equity_cs_rank",
-        ]
-        if c in full.columns
-    ]
-    feature_cols = technical_cols + fundamental_cols + macro_cols + yahoo_cols + ["horizon_norm"]
+    feature_cols = technical_cols + fundamental_cols + macro_cols + ["horizon_norm"]
 
     # NOTE: technical features must exist; macro features are optional (filled with zeros
     # if the macro series failed to load).

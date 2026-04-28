@@ -184,10 +184,9 @@ def main() -> None:
         model_name = str(model_cfg["name"])
         horizon = int(model_cfg["HORIZON"])
         thr_move = float(model_cfg["THR_MOVE"])
-        seq_len = int(CFG["SEQ_LEN"])
 
         print(f"\n{'='*72}")
-        print(f"TRAINING MODEL: {model_name} (horizon={horizon}d, thr={thr_move}, seq_len={seq_len})")
+        print(f"TRAINING MODEL: {model_name} (horizon={horizon}d, thr={thr_move})")
         print(f"{'='*72}")
 
         rows: list[pd.DataFrame] = []
@@ -217,14 +216,6 @@ def main() -> None:
 
         full = pd.concat(rows).sort_values(["secid", "date"]).reset_index(drop=True)
 
-        # Cross-sectional ranks for selected fundamentals (relative positioning by date).
-        # Fill missing with 0.5 (neutral percentile).
-        for base_col in ["roe_calc", "net_margin", "debt_to_equity"]:
-            if base_col in full.columns:
-                full[f"{base_col}_cs_rank"] = (
-                    full.groupby("date")[base_col].rank(pct=True).astype(float).fillna(0.5)
-                )
-
         # Feature columns (NO horizon_norm; horizon is fixed per model)
         technical_cols = [
             "logret_1",
@@ -252,20 +243,9 @@ def main() -> None:
             yahoo_cols = [
                 c for c in YAHOO_FUND_FEATURES if c in full.columns and c not in yahoo_drop
             ]
-            yahoo_rank_cols = [
-                c
-                for c in [
-                    "roe_calc_cs_rank",
-                    "net_margin_cs_rank",
-                    "debt_to_equity_cs_rank",
-                ]
-                if c in full.columns
-            ]
             print(f"  Yahoo features present: {len(yahoo_cols)}")
             if yahoo_drop:
                 print(f"  Yahoo features dropped: {sorted(yahoo_drop)}")
-        else:
-            yahoo_rank_cols = []
 
         smartlab_cols = []
         if CFG.get("USE_SMARTLAB_FUNDAMENTALS", False):
@@ -283,14 +263,7 @@ def main() -> None:
 
         feature_cols = [
             c
-            for c in (
-                technical_cols
-                + fundamental_cols
-                + macro_cols
-                + yahoo_cols
-                + yahoo_rank_cols
-                + smartlab_cols
-            )
+            for c in (technical_cols + fundamental_cols + macro_cols + yahoo_cols + smartlab_cols)
             if c in full.columns
         ]
 
@@ -366,7 +339,7 @@ def main() -> None:
             dates_all,
             fwd_ret_all,
             secids_all,
-            int(seq_len),
+            int(CFG["SEQ_LEN"]),
             split_masks=(m_train, m_val, m_test),
         )
 

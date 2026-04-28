@@ -216,18 +216,6 @@ def main() -> None:
 
         full = pd.concat(rows).sort_values(["secid", "date"]).reset_index(drop=True)
 
-        # Cross-sectional ranks for Yahoo fundamentals (relative positioning by date).
-        # Fill missing with 0.5 (neutral percentile).
-        yahoo_rank_cols: list[str] = []
-        if CFG.get("USE_YAHOO_FUNDAMENTALS", False):
-            for base_col in ["roe_calc", "roa_calc", "net_margin"]:
-                if base_col in full.columns:
-                    rank_col = f"{base_col}_cs_rank"
-                    full[rank_col] = (
-                        full.groupby("date")[base_col].rank(pct=True).astype(float).fillna(0.5)
-                    )
-                    yahoo_rank_cols.append(rank_col)
-
         # Feature columns (NO horizon_norm; horizon is fixed per model)
         technical_cols = [
             "logret_1",
@@ -258,10 +246,6 @@ def main() -> None:
             print(f"  Yahoo features present: {len(yahoo_cols)}")
             if yahoo_drop:
                 print(f"  Yahoo features dropped: {sorted(yahoo_drop)}")
-            if yahoo_rank_cols:
-                print(f"  Yahoo CS-rank features present: {len(yahoo_rank_cols)}")
-        else:
-            yahoo_rank_cols = []
 
         smartlab_cols = []
         if CFG.get("USE_SMARTLAB_FUNDAMENTALS", False):
@@ -279,14 +263,7 @@ def main() -> None:
 
         feature_cols = [
             c
-            for c in (
-                technical_cols
-                + fundamental_cols
-                + macro_cols
-                + yahoo_cols
-                + yahoo_rank_cols
-                + smartlab_cols
-            )
+            for c in (technical_cols + fundamental_cols + macro_cols + yahoo_cols + smartlab_cols)
             if c in full.columns
         ]
 

@@ -184,9 +184,12 @@ def main() -> None:
         model_name = str(model_cfg["name"])
         horizon = int(model_cfg["HORIZON"])
         thr_move = float(model_cfg["THR_MOVE"])
+        seq_len = int(model_cfg.get("SEQ_LEN", int(CFG["SEQ_LEN"])))
 
         print(f"\n{'='*72}")
-        print(f"TRAINING MODEL: {model_name} (horizon={horizon}d, thr={thr_move})")
+        print(
+            f"TRAINING MODEL: {model_name} (horizon={horizon}d, thr={thr_move}, seq_len={seq_len})"
+        )
         print(f"{'='*72}")
 
         rows: list[pd.DataFrame] = []
@@ -197,8 +200,9 @@ def main() -> None:
             y = y.iloc[:-horizon]
             fwd_ret = fwd_ret.iloc[:-horizon]
 
-            if len(df_h) < 250:
-                print(f"  {secid} h={horizon}d: too few rows ({len(df_h)}), skip")
+            min_rows = int(CFG.get("MIN_ROWS_PER_TICKER", 250))
+            if len(df_h) < min_rows:
+                print(f"  {secid} h={horizon}d: too few rows ({len(df_h)} < {min_rows}), skip")
                 continue
 
             tmp = df_h.copy()
@@ -215,6 +219,22 @@ def main() -> None:
             continue
 
         full = pd.concat(rows).sort_values(["secid", "date"]).reset_index(drop=True)
+
+        # ── Cross-sectional ranks (fundamentals work better relatively than absolutely) ──
+        if CFG.get("USE_YAHOO_FUNDAMENTALS", False):
+            # Compute ranks only if the base cols exist in the panel.
+            cs_specs = [
+                ("roe_calc", "roe_cs_rank"),
+                ("net_margin", "net_margin_cs_rank"),
+                ("debt_to_equity", "debt_to_equity_cs_rank"),
+            ]
+            for base_col, rank_col in cs_specs:
+                if base_col in full.columns:
+                    # rank(pct=True) ignores NaNs.
+                    full[rank_col] = (
+                        full.groupby("date")[base_col].rank(pct=True).astype(float).fillna(0.0)
+                    )
+                    full[f"{rank_col}_is_missing"] = (full[rank_col] == 0.0).astype(int)
 
         # Feature columns (NO horizon_norm; horizon is fixed per model)
         technical_cols = [
@@ -339,7 +359,7 @@ def main() -> None:
             dates_all,
             fwd_ret_all,
             secids_all,
-            int(CFG["SEQ_LEN"]),
+            int(seq_len),
             split_masks=(m_train, m_val, m_test),
         )
 
@@ -386,6 +406,14 @@ def main() -> None:
                 ),
             ]
 
+            class_weight = None
+            if model_name.lower() == "short" or horizon <= 7:
+                # Compensation for label imbalance typical for 5d horizon.
+                class_weight = {
+                    0: float(CFG.get("CLASS_WEIGHT_NEG", 1.0)),
+                    1: float(CFG.get("CLASS_WEIGHT_SHORT_POS", 1.5)),
+                }
+
             model.fit(
                 X_tr,
                 y_tr,
@@ -393,6 +421,7 @@ def main() -> None:
                 epochs=int(CFG["EPOCHS"]),
                 batch_size=int(CFG["BATCH_SIZE"]),
                 shuffle=True,
+                class_weight=class_weight,
                 callbacks=cb,
                 verbose=2,
             )
@@ -413,7 +442,26 @@ def main() -> None:
         # Адаптивный порог: top-30% по вероятности
         adaptive_thr = float(np.percentile(prob_ens, 70))
         print(f" Adaptive threshold (p70): {adaptive_thr:.3f}")
-        test_auc = float(roc_auc_score(y_te, prob_ens)) if len(np.unique(y_te)) > 1 else 0.0
+        # Optional evaluation filter: ignore tickers with too few test sequences.
+        eval_min_test = int(CFG.get("EVAL_MIN_TEST_SAMPLES_PER_TICKER", 0))
+        eval_mask = np.ones_like(y_te, dtype=bool)
+        if eval_min_test > 0:
+            counts = pd.Series(s_te).value_counts()
+            good = set(counts[counts >= eval_min_test].index.tolist())
+            eval_mask = np.array([s in good for s in s_te], dtype=bool)
+            print(
+                f"Eval filter: keep tickers with test_n>={eval_min_test}: {len(good)}/{len(counts)}"
+            )
+
+        y_te_eval = y_te[eval_mask]
+        prob_eval = prob_ens[eval_mask]
+        s_te_eval = s_te[eval_mask]
+        d_te_eval = d_te[eval_mask]
+        r_te_eval = r_te[eval_mask]
+
+        test_auc = (
+            float(roc_auc_score(y_te_eval, prob_eval)) if len(np.unique(y_te_eval)) > 1 else 0.0
+        )
 
         print(f"\n=== {model_name.upper()} RESULT ===")
         print(f"Ensemble AUC (test): {test_auc:.4f}")
@@ -422,14 +470,14 @@ def main() -> None:
         # Optional: show per-ticker and backtest for ensemble
         try:
             print("\n=== PER-TICKER AUC (ENSEMBLE) ===")
-            print(per_ticker_metrics(y_te, prob_ens, s_te).to_string(index=False))
+            print(per_ticker_metrics(y_te_eval, prob_eval, s_te_eval).to_string(index=False))
 
             print("\n=== BACKTEST (ENSEMBLE) ===")
             bt = improved_backtest_per_ticker(
-                prob_ens,
-                r_te,
-                d_te,
-                s_te,
+                prob_eval,
+                r_te_eval,
+                d_te_eval,
+                s_te_eval,
                 threshold=adaptive_thr,
                 fee=float(CFG.get("FEE", 0.001)),
                 horizon=horizon,

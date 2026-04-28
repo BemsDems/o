@@ -56,13 +56,10 @@ CFG: Dict[str, Any] = {
     "USE_YAHOO_FUNDAMENTALS": True,
     "YAHOO_FUND_LAG_DAYS": 1,
     "YAHOO_FUND_DROP": [
-        "debt_to_equity",
-        "debt_to_equity_is_missing",
+        # Keep the more independent 5-axis fundamental set (+ cross-sectional ranks).
+        # You may drop any of these if coverage is poor, but default is to keep.
         "fcf_margin",
-        "fcf_margin_is_missing",
         "fund_age_days",
-        "net_margin_is_missing",
-        "roe_calc_is_missing",
     ],
     "FUND_LAG_DAYS": 1,
     # Drop fundamental-derived features if coverage is too low to avoid NaN poisoning.
@@ -86,11 +83,20 @@ CFG: Dict[str, Any] = {
     # Train several separate models in one run (re-using the same downloaded data/features).
     # Each entry defines an independent binary target.
     "MULTI_HORIZON_MODELS": [
-        {"name": "short", "HORIZON": 5, "THR_MOVE": 0.03},
+        # Short: smaller lookback is usually enough for 5d targets.
+        {"name": "short", "HORIZON": 5, "THR_MOVE": 0.03, "SEQ_LEN": 20},
         {"name": "medium", "HORIZON": 30, "THR_MOVE": 0.05},
         {"name": "long", "HORIZON": 120, "THR_MOVE": 0.12},
     ],
     "SEQ_LEN": 30,
+    # Per-ticker data quality filters
+    "MIN_ROWS_PER_TICKER": 250,
+    # If >0, compute/report global AUC/backtest only for tickers with enough test sequences.
+    "EVAL_MIN_TEST_SAMPLES_PER_TICKER": 0,
+
+    # Class weighting (primarily for short horizon imbalance)
+    "CLASS_WEIGHT_NEG": 1.0,
+    "CLASS_WEIGHT_SHORT_POS": 1.5,
     "TRAIN_SPLIT": 0.70,
     "VAL_SPLIT": 0.15,
     # Training speed defaults (CPU-friendly). On Colab GPU you can lower batch and/or increase seeds.

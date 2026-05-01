@@ -115,7 +115,7 @@ def build_features_one(df: pd.DataFrame, *, secid: str = "") -> pd.DataFrame:
 
     n0 = len(out)
     if secid:
-        print(f" candles: {n0}")
+        print(f" свечей: {n0}")
 
     # Log-returns
     for lag in (1, 2, 3, 5, 10):
@@ -155,7 +155,7 @@ def build_features_one(df: pd.DataFrame, *, secid: str = "") -> pd.DataFrame:
     out["volatility_20"] = out["volatility_20"].clip(0.0, 0.1)
 
     if secid:
-        print(f" after indicators: {len(out)}")
+        print(f" после индикаторов: {len(out)}")
 
     out = out.replace([np.inf, -np.inf], np.nan)
 
@@ -176,14 +176,14 @@ def build_features_one(df: pd.DataFrame, *, secid: str = "") -> pd.DataFrame:
     if secid:
         n1 = len(out)
         share = (n1 / n0 * 100.0) if n0 else 0.0
-        print(f" after dropna(critical): {n1} ({share:.1f}%)")
+        print(f" после dropna(critical): {n1} ({share:.1f}%)")
 
     out = out.replace([np.inf, -np.inf], np.nan)
     out = out.fillna(0.0)
 
     if secid:
         ok = not out.isnull().any().any()
-        print(f" final NaN check: {ok}")
+        print(f" финальная проверка NaN: {ok}")
 
     return out
 
@@ -208,18 +208,18 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
     rows: List[pd.DataFrame] = []
 
     for secid in CFG["TICKERS"]:
-        print(f"Loading {secid}...")
+        print(f"Загрузка {secid}...")
         df = fetch_moex_candles(secid, str(CFG["START"]), CFG["END"])
-        print(f" loaded rows: {len(df)}")
+        print(f" загружено строк: {len(df)}")
         if df.empty:
-            print(" -> empty, skip")
+            print(" -> пусто, пропуск")
             continue
 
         df_feat = build_features_one(df, secid=secid)
 
         min_rows = max(250, int(CFG["SEQ_LEN"]) + int(CFG["HORIZON"]) + 50)
         if len(df_feat) < min_rows:
-            print(f" -> too few rows after features ({len(df_feat)} < {min_rows}), skip")
+            print(f" -> слишком мало строк после построения признаков ({len(df_feat)} < {min_rows}), пропуск")
             continue
 
         y, fwd_ret = make_target(
@@ -231,7 +231,7 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
         y = y.iloc[:-h]
         fwd_ret = fwd_ret.iloc[:-h]
 
-        print(f" final rows (after horizon trim): {len(df_feat)}")
+        print(f" итоговые строки (после обрезки по горизонту): {len(df_feat)}")
 
         tmp = df_feat.copy()
         tmp["target"] = y.values
@@ -277,10 +277,10 @@ def build_multi_ticker_dataset() -> Tuple[MultiDataset, List[str]]:
     secids = full["secid"].astype(str).values
 
     print(
-        f"\nMulti-ticker dataset: X={X.shape}, pos_rate={y.mean():.3%}, "
-        f"tickers={sorted(set(secids))}"
+        f"\nМульти-тикер датасет: X={X.shape}, доля положительного класса={y.mean():.3%}, "
+        f"тикеры={sorted(set(secids))}"
     )
-    print(f"Features ({len(feature_cols)}): {feature_cols}")
+    print(f"Признаки ({len(feature_cols)}): {feature_cols}")
 
     return (
         MultiDataset(X=X, y=y, fwd_ret=fwd_ret, dates=dates, secids=secids),
@@ -365,7 +365,7 @@ def make_sequences_multi_ticker(
         ss_te,
     ) = results
 
-    print(f"\nSequences: Train={len(Xs_tr)}, Val={len(Xs_va)}, Test={len(Xs_te)}")
+    print(f"\nПоследовательности: Train={len(Xs_tr)}, Val={len(Xs_va)}, Test={len(Xs_te)}")
     return (
         Xs_tr,
         ys_tr,
@@ -417,13 +417,13 @@ def time_split_masks(dates, secids):
         val_mask[sorted_indices[n_train : n_train + n_val]] = True
         test_mask[sorted_indices[n_train + n_val :]] = True
 
-    print("\n=== SPLIT DISTRIBUTION BY TICKER ===")
+    print("\n=== РАСПРЕДЕЛЕНИЕ СПЛИТА ПО ТИКЕРАМ ===")
     for secid in np.unique(secids):
         sec_mask = secids == secid
         n_tr = int((train_mask & sec_mask).sum())
         n_va = int((val_mask & sec_mask).sum())
         n_te = int((test_mask & sec_mask).sum())
-        print(f"{str(secid):4s}: Train={n_tr:4d}, Val={n_va:4d}, Test={n_te:4d}")
+        print(f"{str(secid):4s}: Train={n_tr:4d}, Val={n_va:4d}, Test={n_te:4d}")  # (подписи оставлены как в коде/выводе)
 
     return train_mask, val_mask, test_mask
 
@@ -597,10 +597,10 @@ def improved_backtest_per_ticker(y_prob, fwd_ret, dates, secids, threshold, fee)
 
 
 def feature_importance_proxy(model, X_test, y_test, feature_names, max_features=20):
-    print("\n=== FEATURE IMPORTANCE (Permutation) ===")
+    print("\n=== ВАЖНОСТЬ ПРИЗНАКОВ (Permutation) ===")
     y_test = y_test.astype(int)
     if len(np.unique(y_test)) < 2:
-        print("Undefined (single class)")
+        print("Не определено (в тесте один класс)")
         return []
 
     base_pred = model.predict(X_test, verbose=0).ravel()
@@ -617,8 +617,8 @@ def feature_importance_proxy(model, X_test, y_test, feature_names, max_features=
         importances.append((fname, base_auc - perm_auc))
 
     importances.sort(key=lambda x: x[1], reverse=True)
-    print(f"Base AUC: {base_auc:.4f}")
-    print(f"{'Feature':>20s} | {'Importance':>10s}")
+    print(f"Базовый AUC: {base_auc:.4f}")
+    print(f"{'Признак':>20s} | {'Важность':>10s}")
     print("-" * 35)
     for fname, imp in importances:
         bar = "█" * max(0, int(imp * 200))
@@ -674,7 +674,7 @@ def main() -> None:
     if X_train.size == 0 or X_val.size == 0 or X_test.size == 0:
         raise RuntimeError("Not enough sequences. Reduce SEQ_LEN or check data.")
 
-    print(f"Shapes: Train={X_train.shape}, Val={X_val.shape}, Test={X_test.shape}")
+    print(f"Размерности: Train={X_train.shape}, Val={X_val.shape}, Test={X_test.shape}")
 
     # Scale
     n_steps, n_feat = X_train.shape[1], X_train.shape[2]
@@ -692,14 +692,16 @@ def main() -> None:
     X_val = np.nan_to_num(X_val, nan=0.0, posinf=0.0, neginf=0.0)
     X_test = np.nan_to_num(X_test, nan=0.0, posinf=0.0, neginf=0.0)
 
-    print("\n=== DATA SANITY ===")
-    print(f"Train: [{X_train.min():.2f}, {X_train.max():.2f}], NaN={np.isnan(X_train).any()}")
-    print(f"y_train distribution: {np.bincount(y_train.astype(int))}")
+    print("\n=== ПРОВЕРКА ДАННЫХ ===")
+    print(
+        f"Train: [{X_train.min():.2f}, {X_train.max():.2f}], NaN={np.isnan(X_train).any()}"
+    )
+    print(f"Распределение y_train: {np.bincount(y_train.astype(int))}")
 
-    # Class weights
+    # Веса классов
     w = compute_class_weight("balanced", classes=np.array([0, 1]), y=y_train)
     cw = {0: float(w[0]), 1: float(w[1])}
-    print(f"Class weights: {cw}")
+    print(f"Веса классов: {cw}")
 
     base_seed = int(CFG.get("SEED", 42))
     n_runs = int(CFG.get("N_RUNS", 1))
@@ -707,7 +709,7 @@ def main() -> None:
     for run_idx in range(n_runs):
         run_seed = base_seed + run_idx
         print(
-            f"\n\n================ RUN {run_idx + 1}/{n_runs} | SEED={run_seed} ================"
+            f"\n\n================ ЗАПУСК {run_idx + 1}/{n_runs} | SEED={run_seed} ================"
         )
 
         seed_everything(run_seed)
@@ -749,20 +751,20 @@ def main() -> None:
         y_prob = model.predict(X_test, verbose=0).ravel()
 
         print(
-            f"\nVal prob: mean={y_prob_val.mean():.4f}, std={y_prob_val.std():.4f}, "
-            f"range=[{y_prob_val.min():.4f}, {y_prob_val.max():.4f}]"
+            f"\nВалидация: среднее={y_prob_val.mean():.4f}, СКО={y_prob_val.std():.4f}, "
+            f"диапазон=[{y_prob_val.min():.4f}, {y_prob_val.max():.4f}]"
         )
         print(
-            f"Test prob: mean={y_prob.mean():.4f}, std={y_prob.std():.4f}, "
-            f"range=[{y_prob.min():.4f}, {y_prob.max():.4f}]"
+            f"Тест: среднее={y_prob.mean():.4f}, СКО={y_prob.std():.4f}, "
+            f"диапазон=[{y_prob.min():.4f}, {y_prob.max():.4f}]"
         )
 
         if np.isnan(y_prob).any():
-            print("FATAL: NaN in predictions")
+            print("ОШИБКА: NaN в предсказаниях")
             continue
 
-        # Threshold search
-        print("\n=== THRESHOLD OPTIMIZATION (VAL) ===")
+        # Подбор порога
+        print("\n=== ОПТИМИЗАЦИЯ ПОРОГА (ВАЛИДАЦИЯ) ===")
         best_thr, best_f1 = 0.5, 0.0
 
         for thr in np.arange(0.30, 0.85, 0.01):
@@ -774,40 +776,40 @@ def main() -> None:
             if f1v > best_f1:
                 best_f1, best_thr = float(f1v), float(thr)
 
-        print(f"Best threshold: {best_thr:.2f} (F1={best_f1:.3f})")
+        print(f"Лучший порог: {best_thr:.2f} (F1={best_f1:.3f})")
 
         if int((y_prob >= best_thr).sum()) == 0:
             best_thr = float(np.percentile(y_prob, 80))
-            print(f"Fallback threshold: {best_thr:.3f}")
+            print(f"Резервный порог: {best_thr:.3f}")
 
-        # Diagnostics
-        print("\n=== FINAL RESULTS ===")
+        # Диагностика
+        print("\n=== ФИНАЛЬНЫЕ РЕЗУЛЬТАТЫ ===")
         g = evaluate_global(y_test, y_prob, thr=best_thr)
         for k, v in g.items():
             print(f" {k}: {v:.4f}")
 
-        print("\n=== PROB SUMMARY ===")
+        print("\n=== СВОДКА ПО ВЕРОЯТНОСТЯМ ===")
         print(
             f" min={y_prob.min():.4f}, max={y_prob.max():.4f}, std={y_prob.std():.4f}, "
             f"mean={y_prob.mean():.4f}"
         )
 
         if bool(CFG.get("EXTENDED_DIAGNOSTICS", True)):
-            print("\n=== FEATURE IMPORTANCE (top-5 + negative) ===")
+            print("\n=== ВАЖНОСТЬ ПРИЗНАКОВ (топ-5 + отрицательные) ===")
             importances = feature_importance_proxy(model, X_test, y_test, feature_cols)
             if importances:
                 for fname, imp in importances[:5]:
                     print(f" {fname:>20s} | {imp:+.4f}")
                 negs = [(f, i) for f, i in importances if i < 0]
                 if negs:
-                    print(" --- negative ---")
+                    print(" --- отрицательные ---")
                     for fname, imp in negs:
                         print(f" {fname:>20s} | {imp:+.4f}")
 
-            print("\n=== PER-TICKER AUC ===")
+            print("\n=== AUC ПО ТИКЕРАМ ===")
             print(per_ticker_metrics(y_test, y_prob, secids_test).to_string(index=False))
 
-            print("\n=== BACKTEST ===")
+            print("\n=== БЭКТЕСТ ===")
             bt = improved_backtest_per_ticker(
                 y_prob,
                 fwd_test,
@@ -819,7 +821,7 @@ def main() -> None:
             if not bt.empty:
                 print(bt.to_string(index=False))
             else:
-                print("No backtest rows")
+                print("Нет строк для бэктеста")
 
 
 if __name__ == "__main__":

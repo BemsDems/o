@@ -445,7 +445,7 @@ def build_rnn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
             64,
             return_sequences=True,
             dropout=0.2,
-            recurrent_dropout=0.1,
+            recurrent_dropout=0.0,
             kernel_initializer="glorot_uniform",
         )
     )(x)
@@ -457,7 +457,7 @@ def build_rnn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
             32,
             return_sequences=True,
             dropout=0.2,
-            recurrent_dropout=0.1,
+            recurrent_dropout=0.0,
         )
     )(x)
     x = tf.keras.layers.BatchNormalization()(x)
@@ -467,7 +467,7 @@ def build_rnn_model(input_shape: Tuple[int, int]) -> tf.keras.Model:
         32,
         return_sequences=False,
         dropout=0.2,
-        recurrent_dropout=0.1,
+        recurrent_dropout=0.0,
     )(x)
     x = tf.keras.layers.BatchNormalization()(x)
 
